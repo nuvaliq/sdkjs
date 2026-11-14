@@ -372,6 +372,7 @@ function (window, undefined) {
 	window['AscCH'].historyitem_CFRule_SetRuleElements = 16;
 	window['AscCH'].historyitem_CFRule_SetDxf = 17;
 	window['AscCH'].historyitem_CFRule_SetRanges = 18;
+	window['AscCH'].historyitem_CFRule_RestoreFormulaAfterShift = 19;
 
 	window['AscCH'].historyitem_Protected_SetSqref = 1;
 	window['AscCH'].historyitem_Protected_SetName = 2;

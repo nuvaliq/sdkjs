@@ -193,6 +193,8 @@
 		this.merge = Asc.c_oAscMergeOptions.None;
 		this.selectionType = null;
 		this.multiselect = false;
+		// The selection is a single cell or exactly one merged area: the borders describe all of it.
+		this.oneCell = false;
 		this.lockText = false;
 
 		this.innertext = null;
@@ -232,6 +234,9 @@
 	};
 	asc_CCellInfo.prototype.asc_getMultiselect = function () {
 		return this.multiselect;
+	};
+	asc_CCellInfo.prototype.asc_getOneCell = function () {
+		return this.oneCell;
 	};
 	asc_CCellInfo.prototype.asc_getLockText = function () {
 		return this.lockText;
@@ -401,6 +406,7 @@
 	prot["asc_getMerge"] = prot.asc_getMerge;
 	prot["asc_getSelectionType"] = prot.asc_getSelectionType;
 	prot["asc_getMultiselect"] = prot.asc_getMultiselect;
+	prot["asc_getOneCell"] = prot.asc_getOneCell;
 	prot["asc_getLockText"] = prot.asc_getLockText;
 	prot["asc_getBorders"] = prot.asc_getBorders;
 	prot["asc_getInnerText"] = prot.asc_getInnerText;

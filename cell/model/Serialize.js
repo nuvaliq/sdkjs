@@ -7175,7 +7175,7 @@
 				} else if (elem instanceof AscCommonExcel.CDataBar) {
 					this.bs.WriteItem(c_oSer_ConditionalFormattingRule.DataBar, function() {oThis.WriteDataBar(elem);});
 				} else if (elem instanceof AscCommonExcel.CFormulaCF) {
-					this.bs.WriteItem(c_oSer_ConditionalFormattingRule.FormulaCF, function() {oThis.memory.WriteString3(elem.Text);});
+					this.bs.WriteItem(c_oSer_ConditionalFormattingRule.FormulaCF, function() {oThis.memory.WriteString3(elem.getFormulaText());});
 				} else if (elem instanceof AscCommonExcel.CIconSet) {
 					this.bs.WriteItem(c_oSer_ConditionalFormattingRule.IconSet, function() {oThis.WriteIconSet(elem);});
 				}
@@ -7272,8 +7272,9 @@
 			if (null != cfvo.Type) {
 				this.bs.WriteItem(c_oSer_ConditionalFormattingValueObject.Type, function() {oThis.memory.WriteByte(cfvo.Type);});
 			}
-			if (null != cfvo.Val) {
-				this.bs.WriteItem(c_oSer_ConditionalFormattingValueObject.Formula, function() {oThis.memory.WriteString3(cfvo.Val);});
+			const value = cfvo.getValueText();
+			if (value != null) {
+				this.bs.WriteItem(c_oSer_ConditionalFormattingValueObject.Formula, function() {oThis.memory.WriteString3(value);});
 			}
 		};
 		this.WriteCFIS = function(cfis) {

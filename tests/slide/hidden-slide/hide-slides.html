@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+    <title>Hide Slides Tests</title>
+    <script type="text/javascript" src="../../../node_modules/jquery/dist/jquery.min.js"></script>
+    <link type="text/css" href="../../../node_modules/qunit/qunit/qunit.css" rel="stylesheet" media="screen"/>
+    <script type="text/javascript" src="../../../node_modules/qunit/qunit/qunit.js"></script>
+    <script type="text/javascript" src="../../../node_modules/xregexp/xregexp-all.js"></script>
+</head>
+<body>
+<h1 id="qunit-header">Hide Slides Tests</h1>
+<h2 id="qunit-banner"></h2>
+<div id="qunit-testrunner-toolbar"></div>
+<h2 id="qunit-userAgent"></h2>
+<ol id="qunit-tests"></ol>
+<div id="qunit-fixture">test markup, will be hidden</div>
+<script type="text/javascript" src="../../../develop/sdkjs/slide/scripts.js"></script>
+<script type="text/javascript">
+	(function ()
+	{
+		const sourceRoot = new URL('../../../', document.baseURI);
+		const sourcePrefix = '../../../../sdkjs/';
+		window.sdk_scripts.forEach(function (item)
+		{
+			let sourceUrl;
+			if (item.includes('TableId.js'))
+			{
+				sourceUrl = new URL('../common/common.js', document.baseURI);
+			}
+			else
+			{
+				if (!item.startsWith(sourcePrefix))
+				{
+					throw new Error('Unknown SDK source path: ' + item);
+				}
+				sourceUrl = new URL(item.slice(sourcePrefix.length), sourceRoot);
+				if (sourceUrl.origin !== sourceRoot.origin || !sourceUrl.href.startsWith(sourceRoot.href))
+				{
+					throw new Error('SDK source is outside the worktree: ' + item);
+				}
+			}
+			document.write('<script type="text/javascript" src="' + sourceUrl.href + '"><\/script>');
+		});
+	})();
+</script>
+<script type="text/javascript" src="../common/editor.js"></script>
+<script type="text/javascript" src="../common/demonstrationManager.js"></script>
+<script type="text/javascript" src="../common/thumbnails.js"></script>
+<script type="text/javascript" src="../common/presentation.js"></script>
+<script type="text/javascript" src="../common/measurer.js"></script>
+<script type="text/javascript" src="hide-slides.js"></script>
+</body>
+</html>

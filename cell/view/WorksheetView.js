@@ -13670,6 +13670,55 @@ function isAllowPasteLink(pastedWb) {
 		return this.objectRender.selectedGraphicObjectsExists() ? this._getSelectionInfoObject() : this._getSelectionInfoCell();
 	};
 
+	// Borders of the active cell (or of the merged area it belongs to) as they are drawn: each side is the line
+	// _drawCellsBorders draws between the cell and its nearest visible neighbour (hidden rows and columns are
+	// skipped), i.e. getMatchingBorder of the two touching sides.
+	WorksheetView.prototype._getSelectionInfoBorders = function (r1, c1, r2, c2) {
+		var t = this;
+		var getBorder = function (row, col) {
+			return t._getVisibleCell(col, row).getBorder();
+		};
+		var colWidth = function (col) {
+			return t._getColumnWidth(col);
+		};
+		var rowHeight = function (row) {
+			return t._getRowHeight(row);
+		};
+		// Nearest index before i with a non-zero size; -1 if there is none.
+		var prevVisible = function (i, size) {
+			for (--i; 0 <= i && 0 === size(i); --i) {
+			}
+			return i;
+		};
+		// Nearest index after i with a non-zero size, searched within the laid out part (count) as the drawing does.
+		var nextVisible = function (i, count, size, max) {
+			for (++i; i < count && 0 === size(i); ++i) {
+			}
+			return i <= max ? i : -1;
+		};
+		var drawn = function (before, after) {
+			var border = AscCommonExcel.getMatchingBorder(before, after);
+			return (border && !border.isEmpty()) ? new Asc.asc_CBorder(border.s, Asc.colorObjToAscColor(border.c)) : null;
+		};
+		var first = getBorder(r1, c1);
+		var last = (r1 === r2 && c1 === c2) ? first : getBorder(r2, c2);
+		var prevCol = prevVisible(c1, colWidth), nextCol = nextVisible(c2, this.cols.length, colWidth, gc_nMaxCol0);
+		var prevRow = prevVisible(r1, rowHeight), nextRow = nextVisible(r2, this.rows.length, rowHeight, gc_nMaxRow0);
+		var res = new AscCommonExcel.asc_CBorders();
+		res.left = drawn(prevCol < 0 ? null : getBorder(r1, prevCol).getR(), first.getL());
+		res.top = drawn(prevRow < 0 ? null : getBorder(prevRow, c1).getB(), first.getT());
+		res.right = drawn(last.getR(), nextCol < 0 ? null : getBorder(r2, nextCol).getL());
+		res.bottom = drawn(last.getB(), nextRow < 0 ? null : getBorder(nextRow, c2).getT());
+		var toAsc = function (prop) {
+			return prop ? new Asc.asc_CBorder(prop.s, Asc.colorObjToAscColor(prop.c)) : null;
+		};
+		if (first.d && !first.d.isEmpty()) {
+			res.diagDown = first.dd ? toAsc(first.d) : null;
+			res.diagUp = first.du ? toAsc(first.d) : null;
+		}
+		return res;
+	};
+
     WorksheetView.prototype._getSelectionInfoCell = function () {
         var selectionRange = this.model.selectionRange;
         var cell = selectionRange.activeCell;
@@ -13682,6 +13731,9 @@ function isAllowPasteLink(pastedWb) {
 
         var cell_info = new asc_CCellInfo();
         cell_info.xfs = c.getXfs(false).clone();
+        cell_info.border = this._getSelectionInfoBorders(r1, c1, mc ? mc.r2 : r1, mc ? mc.c2 : c1);
+        var lastRange = selectionRange.getLast().clone(true);
+        cell_info.oneCell = selectionRange.isSingleRange() && (mc ? lastRange.isEqual(mc) : lastRange.isOneCell());
 
 		AscCommonExcel.g_ActiveCell = new Asc.Range(c1, r1, c1, r1);
         cell_info.text = c.getValueForEdit(true);

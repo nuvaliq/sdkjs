@@ -2788,7 +2788,7 @@
 	WriterToJSON.prototype.SerFormulaCF = function(oFormulaCf)
 	{
 		return {
-			"formula": oFormulaCf.Text,
+			"formula": oFormulaCf.getFormulaText(),
 			"type":    "formulaCf"
 		}
 	};
@@ -2862,10 +2862,11 @@
 	};
 	WriterToJSON.prototype.SerCondFmtValObj = function(oCondFmtValObj)
 	{
+		const value = oCondFmtValObj.getValueText();
 		return {
 			"gte":  oCondFmtValObj.Gte != null ? oCondFmtValObj.Gte : undefined,
 			"type": oCondFmtValObj.Type != null ? ToXML_ST_CfvoType(oCondFmtValObj.Type) : undefined,
-			"val":  oCondFmtValObj.Val != null ? oCondFmtValObj.Val : undefined
+			"val":  value ?? undefined
 		}
 	};
 	WriterToJSON.prototype.SerColorExcell = function(oColor)

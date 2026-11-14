@@ -876,6 +876,9 @@
 			for (var i = 0; i < formulas.length; ++i) {
 				formulas[i].removeDependencies();
 			}
+			ws.forEachConditionalFormattingRules(function (rule) {
+				rule.removeFormulaDependencies();
+			});
 			//defnames
 			this._foreachDefNameSheet(sheetId, function(defName){
 				if (!defName.type !== Asc.c_oAscDefNameType.table) {
@@ -3986,6 +3989,9 @@
 
 			//now insertBefore is index of inserted sheet
 			this._insertWorksheetFormula(insertBefore);
+			newSheet.forEachConditionalFormattingRules(function (rule) {
+				rule.buildFormulaDependencies(newSheet);
+			});
 
 			if (!tableNames) {
 				tableNames = newSheet.getTableNames();
@@ -4040,6 +4046,14 @@
 		this._insertTablePartsName(sheet);
 		//restore the list of cells with formulas for sheet
 		sheet._BuildDependencies(sheet.getCwf());
+		sheet.forEachConditionalFormattingRules(function (rule) {
+			for (const parser of rule.getFormulaParsers()) {
+				parser.buildDependencies();
+			}
+			if (rule.ranges) {
+				sheet.setDirtyConditionalFormatting(new AscCommonExcel.MultiplyRange(rule.ranges));
+			}
+		});
 		this.sortDependency();
 	};
 	Workbook.prototype._insertTablePartsName = function (sheet) {
@@ -7163,7 +7177,9 @@
 		if (wsFrom.isConditionalFormattingRules()) {
 			let t = this;
 			wsFrom.forEachConditionalFormattingRules(function (val) {
-				t.addConditionalFormattingRule(val);
+				const rule = val.clone();
+				rule.id = val.id;
+				t.addConditionalFormattingRule(rule);
 			})
 		}
 		if (wsFrom.sheetPr)
@@ -7726,7 +7742,7 @@
 									return false;
 								};
 							})(oRule, oRule.aRuleElements[0],
-								new AscCommonExcel.CConditionalFormattingFormulaParent(this, oRule, true),
+								new AscCommonExcel.CConditionalFormattingFormulaParent(t, oRule, true),
 								bboxCf ? bboxCf.r1 : 0, bboxCf ? bboxCf.c1 : 0));
 						};
 
@@ -8214,6 +8230,7 @@
 		var nDif = -(stop - start + 1);
 		var oActualRange = new Asc.Range(0, start, gc_nMaxCol0, stop);
 		var offset = new AscCommon.CellBase(nDif, 0);
+		this.removeConditionalFormattingBeforeShift(oActualRange);
 		//renameDependencyNodes before move cells to store current location in history
 		var renameRes = this.renameDependencyNodes(offset, oActualRange);
 		var redrawTablesArr = this.autoFilters.insertRows("delCell", oActualRange, c_oAscDeleteOptions.DeleteRows);
@@ -8225,7 +8242,7 @@
 			AscCommon.History.LocalChange = true;
 			this.updateSortStateOffset(oActualRange, offset);
 			this.updateSparklineGroupOffset(oActualRange, offset);
-			this.updateConditionalFormattingOffset(oActualRange, offset);
+			this.setConditionalFormattingOffset(oActualRange, offset);
 			this.updateProtectedRangeOffset(oActualRange, offset);
 			AscCommon.History.LocalChange = false;
 		}
@@ -8397,6 +8414,7 @@
 		var nDif = -(stop - start + 1), i, j, length;
 		var oActualRange = new Asc.Range(start, 0, stop, gc_nMaxRow0);
 		var offset = new AscCommon.CellBase(0, nDif);
+		this.removeConditionalFormattingBeforeShift(oActualRange);
 		//renameDependencyNodes before move cells to store current location in history
 		var renameRes = this.renameDependencyNodes(offset, oActualRange);
 		var redrawTablesArr = this.autoFilters.insertColumn(oActualRange, nDif);
@@ -8408,7 +8426,7 @@
 			AscCommon.History.LocalChange = true;
 			this.updateSortStateOffset(oActualRange, offset);
 			this.updateSparklineGroupOffset(oActualRange, offset);
-			this.updateConditionalFormattingOffset(oActualRange, offset);
+			this.setConditionalFormattingOffset(oActualRange, offset);
 			this.updateProtectedRangeOffset(oActualRange, offset);
 			AscCommon.History.LocalChange = false;
 		}
@@ -9862,6 +9880,7 @@
 		var dif = nLeft - nRight - 1;
 		var oActualRange = new Asc.Range(nLeft, oBBox.r1, gc_nMaxCol0, oBBox.r2);
 		var offset = new AscCommon.CellBase(0, dif);
+		this.removeConditionalFormattingBeforeShift(oBBox);
 		//renameDependencyNodes before move cells to store current location in history
 		var renameRes = this.renameDependencyNodes(offset, oBBox);
 		var redrawTablesArr = this.autoFilters.insertColumn( oBBox, dif );
@@ -9869,7 +9888,7 @@
 			AscCommon.History.LocalChange = true;
 			this.updateSortStateOffset(oBBox, offset);
 			this.updateSparklineGroupOffset(oBBox, offset);
-			this.updateConditionalFormattingOffset(oBBox, offset);
+			this.setConditionalFormattingOffset(oBBox, offset);
 			this.updateProtectedRangeOffset(oBBox, offset);
 			AscCommon.History.LocalChange = false;
 		}
@@ -9908,6 +9927,7 @@
 		var dif = nTop - nBottom - 1;
 		var oActualRange = new Asc.Range(oBBox.c1, oBBox.r1, oBBox.c2, gc_nMaxRow0);
 		var offset = new AscCommon.CellBase(dif, 0);
+		this.removeConditionalFormattingBeforeShift(oBBox);
 		//renameDependencyNodes before move cells to store current location in history
 		var renameRes = this.renameDependencyNodes(offset, oBBox);
 		var redrawTablesArr = this.autoFilters.insertRows("delCell", oBBox, c_oAscDeleteOptions.DeleteCellsAndShiftTop);
@@ -9915,7 +9935,7 @@
 			AscCommon.History.LocalChange = true;
 			this.updateSortStateOffset(oBBox, offset);
 			this.updateSparklineGroupOffset(oBBox, offset);
-			this.updateConditionalFormattingOffset(oBBox, offset);
+			this.setConditionalFormattingOffset(oBBox, offset);
 			this.updateProtectedRangeOffset(oBBox, offset);
 			AscCommon.History.LocalChange = false;
 		}
@@ -13338,7 +13358,9 @@
 
 		val.recalcInterfaceFormula(this);
 		this.addConditionalFormattingRule(val);
+		val.buildFormulaDependencies(this);
 		this.cleanConditionalFormattingRangeIterator();
+		this.setDirtyConditionalFormatting(new AscCommonExcel.MultiplyRange(val.ranges));
 		if (addToHistory) {
 			AscCommon.History.Add(AscCommonExcel.g_oUndoRedoWorksheet, AscCH.historyitem_Worksheet_CFRuleAdd, this.getId(), val.getUnionRange(), new AscCommonExcel.UndoRedoData_CF(val.id, null, val.clone ? val.clone() : val));
 		}
@@ -13390,6 +13412,7 @@
 	Worksheet.prototype.deleteCFRule = function (id, addToHistory) {
 		let oRule = this.getCFRuleById(id);
 		if (oRule) {
+			oRule.removeFormulaDependencies();
 			delete this.aConditionalFormattingRules[id];
 			this.cleanConditionalFormattingRangeIterator();
 			if (addToHistory) {
@@ -13412,14 +13435,31 @@
 		return oRule;
 	};
 
+	Worksheet.prototype.removeConditionalFormattingBeforeShift = function (range) {
+		const workbook = this.workbook;
+		if (workbook.bUndoChanges || (workbook.bRedoChanges && !workbook.bCollaborativeChanges)) {
+			return;
+		}
+		// Undo restores fully deleted rules after the inverse shift, so record their original formulas.
+		const history = AscCommon.History;
+		const localChange = history.LocalChange;
+		history.LocalChange = true;
+		try {
+			this.removeCoveredConditionalFormattingRules(range);
+		} finally {
+			history.LocalChange = localChange;
+		}
+	};
+	Worksheet.prototype.removeCoveredConditionalFormattingRules = function (range) {
+		this.forEachConditionalFormattingRules(rule => {
+			if (rule.containsIntoRange(range)) {
+				this.deleteCFRule(rule.id, true);
+			}
+		});
+	};
 	Worksheet.prototype.updateConditionalFormattingOffset = function (range, offset) {
-		let t = this;
 		if (offset.row < 0 || offset.col < 0) {
-			this.forEachConditionalFormattingRules(function (val) {
-				if (val.containsIntoRange(range)) {
-					t.deleteCFRule(val.id, true);
-				}
-			});
+			this.removeCoveredConditionalFormattingRules(range);
 		}
 		this.setConditionalFormattingOffset(range, offset);
 	};

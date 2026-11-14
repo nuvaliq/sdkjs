@@ -3438,6 +3438,9 @@ function (window, undefined) {
 			Type = AscCH.historyitem_Worksheet_RemoveCols;
 		} else if (AscCH.historyitem_Worksheet_RemoveCols === Type) {
 			Type = AscCH.historyitem_Worksheet_AddCols;
+		} else if (AscCH.historyitem_Worksheet_CFRuleDelete === Type && Data.from) {
+			Type = AscCH.historyitem_Worksheet_CFRuleAdd;
+			Data = new UndoRedoData_CF(Data.id, null, Data.from.clone());
 		} else if (AscCH.historyitem_Worksheet_ShiftCellsLeft === Type) {
 			Type = AscCH.historyitem_Worksheet_ShiftCellsRight;
 		} else if (AscCH.historyitem_Worksheet_ShiftCellsRight === Type) {
@@ -3464,6 +3467,28 @@ function (window, undefined) {
 		return new UndoRedoItemSerializable(ToClass, Type, nSheetId, oRange, Data, LocalChange);
 	};
 	UndoRedoWoorksheet.prototype.CommuteRelated = function (oActionToUndo, oActionOther) {
+		if (AscCH.historyitem_Worksheet_CFRuleAdd === oActionToUndo.nActionType) {
+			const otherType = oActionOther.nActionType;
+			if (oActionOther.nSheetId === oActionToUndo.nSheetId) {
+				if (oActionOther.oClass === this && otherType === AscCH.historyitem_Worksheet_CFRuleAdd) {
+					// Adding a rule can shift existing priorities while the deleted rule is absent.
+					return false;
+				}
+				const isRuleChange = oActionOther.oClass === AscCommonExcel.g_oUndoRedoCF
+					|| (oActionOther.oClass === this && otherType === AscCH.historyitem_Worksheet_CFRuleDelete);
+				if (isRuleChange && oActionOther.oData.id === oActionToUndo.oData.id) {
+					return false;
+				}
+				if (oActionOther.oClass === AscCommonExcel.g_oUndoRedoCF
+					&& otherType === AscCH.historyitem_CFRule_SetPriority
+					&& oActionOther.oData.to === oActionToUndo.oData.to.priority) {
+					return false;
+				}
+			}
+			// A deleted rule does not track reference changes while it is out of the workbook.
+			return otherType === AscCH.historyitem_Worksheet_RemoveCell && oActionOther.oClass === this
+				|| !oActionOther.oClass?.forwardTransformationIsAffect?.(otherType);
+		}
 		let isAddRowUndo = AscCH.historyitem_Worksheet_AddRows === oActionToUndo.nActionType;
 		let isAddColUndo = AscCH.historyitem_Worksheet_AddCols === oActionToUndo.nActionType;
 		let isRemoveRowUndo = AscCH.historyitem_Worksheet_RemoveRows === oActionToUndo.nActionType;
@@ -6022,16 +6047,19 @@ function (window, undefined) {
 					cfRule.asc_setStopIfTrue(value);
 					break;
 				}
-				case AscCH.historyitem_CFRule_SetText: {
-					cfRule.asc_setText(value);
-					break;
-				}
 				case AscCH.historyitem_CFRule_SetTimePeriod: {
 					cfRule.asc_setTimePeriod(value);
 					break;
 				}
+				case AscCH.historyitem_CFRule_SetText:
 				case AscCH.historyitem_CFRule_SetType: {
-					cfRule.asc_setType(value);
+					cfRule.removeFormulaDependencies();
+					if (Type === AscCH.historyitem_CFRule_SetType) {
+						cfRule.type = value;
+					} else {
+						cfRule.asc_setText(value);
+					}
+					cfRule.buildFormulaDependencies(oModel);
 					break;
 				}
 				case AscCH.historyitem_CFRule_SetPivot: {
@@ -6058,14 +6086,19 @@ function (window, undefined) {
 						return ascRanges;
 					};
 
-					cfRule.ranges = toAscRanges(value);
-					if (oModel) {
-						oModel.cleanConditionalFormattingRangeIterator();
-					}
+					cfRule.setLocation(toAscRanges(value), oModel);
 					break;
 				}
 				case AscCH.historyitem_CFRule_SetRuleElements: {
-					cfRule.aRuleElements = value;
+					cfRule.setRuleElements(value, oModel);
+					oModel.setDirtyConditionalFormatting(new AscCommonExcel.MultiplyRange(cfRule.ranges));
+					break;
+				}
+				case AscCH.historyitem_CFRule_RestoreFormulaAfterShift: {
+					if (bUndo) {
+						cfRule.setRuleElements(value.map(element => element.clone()), oModel);
+						oModel.setDirtyConditionalFormatting(new AscCommonExcel.MultiplyRange(cfRule.ranges));
+					}
 					break;
 				}
 			}

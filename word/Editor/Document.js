@@ -27472,11 +27472,14 @@ CDocument.prototype.private_ConvertTextToTable = function(oProps, oSelectedConte
 	if (oProps.get_AutoFitType() !== Asc.c_oAscTextToTableAutoFitType.Window)
 	{
 		var width = oProps.get_Fit();
+		var isContent = oProps.get_AutoFitType() === Asc.c_oAscTextToTableAutoFitType.Content && !haveTable;
 		var oTableProps = new Asc.CTableProp();
-		oTableProps.put_CellsWidth((width > 0) ? width : null);
+		oTableProps.put_CellsWidth(isContent ? null : ((width > 0) ? width : null));
 		oTableProps.put_CellSelect(true);
-		if (width === -10 && !haveTable)
-			oTableProps.put_TableLayout(1);
+		if (isContent)
+			oTableProps.put_TableLayout(Asc.c_oAscTableLayout.AutoFit);
+		else if (width === -10 && !haveTable)
+			oTableProps.put_TableLayout(Asc.c_oAscTableLayout.Fixed);
 		
 		oTable.SetTableProps(oTableProps);
 	}

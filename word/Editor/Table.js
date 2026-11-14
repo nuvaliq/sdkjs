@@ -17156,7 +17156,7 @@ CTable.prototype.SetContentSelection = function(StartDocPos, EndDocPos, Depth, S
     var __EndDocPos = _EndDocPos, __EndFlag = _EndFlag;
     if (null !== _EndDocPos && true === _EndDocPos[Depth + 1].Deleted)
     {
-        if (EndCell < this.Content[EndCell].Get_CellsCount())
+        if (EndCell < this.Content[EndRow].Get_CellsCount())
         {
             __EndDocPos = null;
             __EndFlag   = 1;
@@ -17194,7 +17194,8 @@ CTable.prototype.SetContentSelection = function(StartDocPos, EndDocPos, Depth, S
         this.private_UpdateSelectedCellsArray(isOneElement ? false : true);
     }
 
-    if (null !== EndDocPos && undefined !== EndDocPos[Depth].Type && undefined !== EndDocPos[Depth].Type2)
+    if (null !== EndDocPos && undefined !== EndDocPos[Depth].Type && undefined !== EndDocPos[Depth].Type2
+        && (table_Selection_Text !== EndDocPos[Depth].Type || (null !== __StartDocPos && null !== __EndDocPos)))
 	{
 		this.Selection.Type  = EndDocPos[Depth].Type;
 		this.Selection.Type2 = EndDocPos[Depth].Type2;

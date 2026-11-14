@@ -4786,13 +4786,13 @@
 
 		this.SlideDrawer.CheckSlide(drDoc.SlideCurrent);
 
-		if (true !== isFromZoom) {
-			this.m_oLogicDocument.Document_UpdateInterfaceState();
-		}
-
 		this.CalculateDocumentSize(false);
 
 		this.Thumbnails.SelectPage(lPageNum);
+
+		if (true !== isFromZoom) {
+			this.m_oLogicDocument.Document_UpdateInterfaceState();
+		}
 
 		this.CreateBackgroundHorRuler();
 		this.CreateBackgroundVerRuler();

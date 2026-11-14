@@ -83,7 +83,23 @@
 	CConditionalFormattingFormulaParent.prototype.onFormulaEvent = function (type, eventData) {
 		if (AscCommon.c_oNotifyParentType.IsDefName === type && this.isDefName) {
 			return {bbox: this.rule.getBBox(), ranges: this.rule.ranges};
-		} else if (AscCommon.c_oNotifyParentType.Change === type) {
+		}
+		if (AscCommon.c_oNotifyParentType.ChangeFormula === type) {
+			if (eventData.formula.getFormulaRaw() === eventData.assemble) {
+				return;
+			}
+			const {type: action, offset} = eventData.notifyData;
+			const workbook = this.ws.workbook;
+			const history = AscCommon.History;
+			if (action === AscCommon.c_oNotifyType.Shift && (offset.row < 0 || offset.col < 0)
+				&& !workbook.bUndoChanges && !workbook.bRedoChanges && history.CanAddChanges()) {
+				// An inverse shift cannot restore a reference to a deleted cell.
+				const elements = this.rule.aRuleElements.map(element => element.clone());
+				history.Add(AscCommonExcel.g_oUndoRedoCF, AscCH.historyitem_CFRule_RestoreFormulaAfterShift,
+					this.ws.getId(), this.rule.getUnionRange(), new AscCommonExcel.UndoRedoData_CF(this.rule.id, elements), true);
+			}
+		}
+		if (type === AscCommon.c_oNotifyParentType.Change || type === AscCommon.c_oNotifyParentType.ChangeFormula) {
 			this.ws.setDirtyConditionalFormatting(new AscCommonExcel.MultiplyRange(this.rule.ranges));
 		}
 	};
@@ -132,6 +148,7 @@
 	CConditionalFormattingRule.prototype.clone = function () {
 		var i, res = new CConditionalFormattingRule();
 		res.aboveAverage = this.aboveAverage;
+		res.activePresent = this.activePresent;
 		res.bottom = this.bottom;
 		if (this.dxf) {
 			res.dxf = this.dxf.clone();
@@ -200,7 +217,7 @@
 		}
 
 		if (canCombine) {
-			this.ranges = [result];
+			this.setLocation([result]);
 		}
 	};
 
@@ -273,6 +290,43 @@
 		for (var i = 0; i < this.aRuleElements.length; i++) {
 			this.aRuleElements[i].recalcFormula && this.aRuleElements[i].recalcFormula(ws, toInterface);
 		}
+	};
+
+	CConditionalFormattingRule.prototype.buildFormulaDependencies = function (ws) {
+		const usesFirstTextFormula = this.type === Asc.ECfType.containsText || this.type === Asc.ECfType.notContainsText;
+		const usesSecondTextFormula = this.type === Asc.ECfType.beginsWith || this.type === Asc.ECfType.endsWith;
+		if (this.type === Asc.ECfType.expression || this.type === Asc.ECfType.cellIs
+			|| ((usesFirstTextFormula || usesSecondTextFormula) && this.getFormulaCellIs(usesFirstTextFormula))) {
+			const parent = new CConditionalFormattingFormulaParent(ws, this, true);
+			for (const element of this.aRuleElements) {
+				if (element instanceof CFormulaCF && element.Text) {
+					element.init(ws, parent, true);
+				}
+			}
+		}
+		for (const value of this._getCFVOs() || []) {
+			const text = value.getValueText();
+			if (text && (value.Type === AscCommonExcel.ECfvoType.Formula || !isNumeric(text))) {
+				this.initThresholdFormula(value, ws, true);
+			}
+		}
+	};
+	CConditionalFormattingRule.prototype.getFormulaParsers = function () {
+		const formulas = this.aRuleElements.filter(element => element instanceof CFormulaCF);
+		for (const value of this._getCFVOs() || []) {
+			if (value.formula) {
+				formulas.push(value.formula);
+			}
+		}
+		return formulas.map(formula => formula._f).filter(parser => parser?.parent);
+	};
+
+	CConditionalFormattingRule.prototype.removeFormulaDependencies = function () {
+		const registered = this.getFormulaParsers().filter(parser => parser.isInDependencies);
+		for (const parser of registered) {
+			parser.removeDependencies();
+		}
+		return registered;
 	};
 	CConditionalFormattingRule.prototype.Write_ToBinary2 = function (writer) {
 		//for wrapper
@@ -476,6 +530,7 @@
 	};
 
 	CConditionalFormattingRule.prototype.set = function (val, addToHistory, ws) {
+		const formulaContextChanged = this.type !== val.type || this.text !== val.text;
 
 		this.aboveAverage = this.checkProperty(this.aboveAverage, val.aboveAverage, AscCH.historyitem_CFRule_SetAboveAverage, ws, addToHistory);
 		this.activePresent = this.checkProperty(this.activePresent, val.activePresent, AscCH.historyitem_CFRule_SetActivePresent, ws, addToHistory);
@@ -513,7 +568,10 @@
 					ws.getId(), this.getUnionRange(), new AscCommonExcel.UndoRedoData_CF(this.id, this.aRuleElements, val.aRuleElements));
 			}
 
-			this.aRuleElements = val.aRuleElements;
+			this.setRuleElements(val.aRuleElements, ws);
+		} else if (formulaContextChanged) {
+			this.removeFormulaDependencies();
+			this.buildFormulaDependencies(ws);
 		}
 
 		if ((this.dxf && val.dxf && !this.dxf.isEqual(val.dxf)) || (this.dxf && !val.dxf) || (!this.dxf && val.dxf)) {
@@ -531,6 +589,12 @@
 		}
 	};
 
+	CConditionalFormattingRule.prototype.setRuleElements = function (elements, ws) {
+		this.removeFormulaDependencies();
+		this.aRuleElements = elements;
+		this.buildFormulaDependencies(ws);
+	};
+
 	CConditionalFormattingRule.prototype.setLocation = function (location, ws, addToHistory) {
 		if (addToHistory && !History.TurnOffHistory) {
 			var getUndoRedoRange = function (_ranges) {
@@ -544,7 +608,11 @@
 			History.Add(AscCommonExcel.g_oUndoRedoCF, AscCH.historyitem_CFRule_SetRanges,
 				ws.getId(), this.getUnionRange(location), new AscCommonExcel.UndoRedoData_CF(this.id, getUndoRedoRange(this.ranges), getUndoRedoRange(location)));
 		}
+		const registered = this.removeFormulaDependencies();
 		this.ranges = location;
+		for (const formula of registered) {
+			formula.buildDependencies();
+		}
 		if (ws) {
 			ws.cleanConditionalFormattingRangeIterator();
 		}
@@ -1026,17 +1094,23 @@
 		var oRuleElement = this.aRuleElements[0];
 		return oRuleElement && oRuleElement.aCFVOs;
 	};
+	CConditionalFormattingRule.prototype.initThresholdFormula = function (value, ws, deferInvalid) {
+		if (!value.formulaParent) {
+			value.formulaParent = new CConditionalFormattingFormulaParent(ws, this, false);
+		}
+		if (!value.formula) {
+			value.formula = new CFormulaCF();
+			value.formula.Text = value.Val;
+		}
+		value.formula.init(ws, value.formulaParent, deferInvalid);
+	};
 	CConditionalFormattingRule.prototype._getValue = function (values, oCFVO, ws) {
 		var res, min;
 		if (oCFVO) {
 			if (oCFVO.Val) {
 				res = 0;
-				if (null === oCFVO.formula) {
-					oCFVO.formulaParent = new CConditionalFormattingFormulaParent(ws, this, false);
-					oCFVO.formula = new CFormulaCF();
-					oCFVO.formula.Text = oCFVO.Val;
-				}
-				var calcRes = oCFVO.formula.getValue(ws, oCFVO.formulaParent, null, null, true);
+				this.initThresholdFormula(oCFVO, ws);
+				var calcRes = oCFVO.formula.getValue(ws, null, null, null, true);
 				if (calcRes && calcRes.tocNumber) {
 					calcRes = calcRes.tocNumber();
 					if (calcRes && calcRes.toNumber) {
@@ -2152,13 +2226,17 @@
 
 	CFormulaCF.prototype.clone = function () {
 		var res = new CFormulaCF();
-		res.Text = this.Text;
+		res.Text = this.getFormulaText();
 		return res;
 	};
+	CFormulaCF.prototype.getFormulaText = function () {
+		return this._f ? this._f.getFormulaRaw() : this.Text;
+	};
 	CFormulaCF.prototype.Write_ToBinary2 = function (writer) {
-		if (null != this.Text) {
+		const text = this.getFormulaText();
+		if (text != null) {
 			writer.WriteBool(true);
-			writer.WriteString2(this.Text);
+			writer.WriteString2(text);
 		} else {
 			writer.WriteBool(false);
 		}
@@ -2169,21 +2247,26 @@
 		}
 	};
 	CFormulaCF.prototype.isEqual = function (val) {
-		return val.Text === this.Text;
+		return val instanceof CFormulaCF && val.getFormulaText() === this.getFormulaText();
 	};
-	CFormulaCF.prototype.init = function (ws, opt_parent) {
+	CFormulaCF.prototype.init = function (ws, opt_parent, deferInvalid) {
 		if (!this._f) {
-			this._f = new AscCommonExcel.parserFormula(this.Text, opt_parent, ws);
+			const formula = new AscCommonExcel.parserFormula(this.Text, opt_parent, ws);
 			var parseResult = new AscCommonExcel.ParseResult([]);
 			parseResult.needCorrect = true;
-			this._f.parse(null, null, parseResult);
+			if (!formula.parse(null, null, parseResult) && deferInvalid) {
+				// During import, a referenced worksheet may not have been added yet.
+				return;
+			}
+			this._f = formula;
 			if (parseResult.needAssemble) {
 				this.Text = this._f.assemble(true);
+				this._f.setFormulaString(this.Text);
 			}
-			if (opt_parent) {
-				//todo realize removeDependencies
-				this._f.buildDependencies();
-			}
+		}
+		if (opt_parent && !this._f.isInDependencies) {
+			this._f.parent = opt_parent;
+			this._f.buildDependencies();
 		}
 	};
 	CFormulaCF.prototype.recalcFormula = function (ws, toInterface) {
@@ -2491,10 +2574,12 @@
 		var res = new CConditionalFormatValueObject();
 		res.Gte = this.Gte;
 		res.Type = this.Type;
-		res.Val = this.Val;
-		res.formulaParent = this.formulaParent ? this.formulaParent.clone() : null;
 		res.formula = this.formula ? this.formula.clone() : null;
+		res.Val = this.getValueText();
 		return res;
+	};
+	CConditionalFormatValueObject.prototype.getValueText = function () {
+		return this.formula?.getFormulaText() ?? this.Val;
 	};
 	CConditionalFormatValueObject.prototype.merge = function (obj) {
 		//compare by default values
@@ -2527,9 +2612,10 @@
 		} else {
 			writer.WriteBool(false);
 		}
-		if (null != this.Val) {
+		const value = this.getValueText();
+		if (value != null) {
 			writer.WriteBool(true);
-			writer.WriteString2(this.Val);
+			writer.WriteString2(value);
 		} else {
 			writer.WriteBool(false);
 		}
@@ -2562,13 +2648,15 @@
 	};
 	CConditionalFormatValueObject.prototype.asc_setVal = function (val) {
 		val = correctFromInterface(val);
-		this.Val = (val !== undefined && val !== null) ? val + "" : val;
+		const text = val == null ? val : String(val);
+		if (this.getValueText() !== text) {
+			this.formula?._f?.removeDependencies();
+			this.formula = null;
+		}
+		this.Val = text;
 	};
 	CConditionalFormatValueObject.prototype.isEqual = function (elem) {
-		if (this.Gte === elem.Gte && this.Type === elem.Type && this.Val === elem.Val && this.Type === elem.Type) {
-			return true;
-		}
-		return false;
+		return this.Gte === elem.Gte && this.Type === elem.Type && this.getValueText() === elem.getValueText();
 	};
 
 	function CConditionalFormatIconSet() {

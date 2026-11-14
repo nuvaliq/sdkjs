@@ -91,6 +91,7 @@ if (customTestDir)
 	'cell/spreadsheet-calculation/autoFilterTests.html',
 	'cell/spreadsheet-calculation/UserProtectedRangesTest.html',
 	'cell/spreadsheet-calculation/FormulaTrace.html',
+	'cell/spreadsheet-calculation/SelectionInfoBordersTests.html',
 	'cell/spreadsheet-calculation/whatIfAnalysisTests.html',
 	'cell/spreadsheet-calculation/NumFormatParse.html',
 	'cell/spreadsheet-calculation/DataValidationTests.html',

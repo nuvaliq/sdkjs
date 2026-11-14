@@ -5037,6 +5037,7 @@ CPresentation.prototype.hideSlides = function (isHide, aSlides) {
 			}
 		}
 		this.DrawingDocument.OnEndRecalculate(false, false);
+		this.Document_UpdateInterfaceState();
 		this.Document_UpdateUndoRedoState();
 	}
 };
