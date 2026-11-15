@@ -260,6 +260,16 @@ QUnit.config.autostart = false;
 		wbView._onEditCell(enterOptions);
 	}
 
+	function Undo()
+	{
+		ExecuteShortcut(Asc.c_oAscSpreadsheetShortcutType.EditUndo);
+	}
+
+	function Redo()
+	{
+		ExecuteShortcut(Asc.c_oAscSpreadsheetShortcutType.EditRedo);
+	}
+
 	function GetSelectedCellEditorText()
 	{
 		const fragments = cellEditor.copySelection() || [];
@@ -674,17 +684,349 @@ QUnit.config.autostart = false;
 		EnterText('l');
 		EnterText('l');
 		EnterText('o');
-		ExecuteShortcut(Asc.c_oAscSpreadsheetShortcutType.EditUndo);
-		assert.strictEqual(GetCellEditorText(), 'Hell', 'Check undo');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo of the whole typed word');
 
-		ExecuteShortcut(Asc.c_oAscSpreadsheetShortcutType.EditUndo);
-		assert.strictEqual(GetCellEditorText(), 'Hel', 'Check undo');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'Hello', 'Check redo of the whole typed word');
 
-		ExecuteShortcut(Asc.c_oAscSpreadsheetShortcutType.EditRedo);
-		assert.strictEqual(GetCellEditorText(), 'Hell', 'Check redo');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo after redo');
+	});
 
-		ExecuteShortcut(Asc.c_oAscSpreadsheetShortcutType.EditRedo);
-		assert.strictEqual(GetCellEditorText(), 'Hello', 'Check redo');
+	QUnit.test('Check undo/redo in cell editor groups typing by words', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('Hello world');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'Hello ', 'Check undo of the last word, the space stays with the previous word');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo of the first word with the space');
+
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'Hello ', 'Check redo of the first word');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'Hello world', 'Check redo of the second word');
+	});
+
+	QUnit.test('Check undo/redo in cell editor joins several spaces to the previous word', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('ab   cd');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab   ', 'Check undo of the last word');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo of the first word with spaces');
+	});
+
+	QUnit.test('Check a pause breaks the typing group', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		const now = Date.now;
+		let time = 10000;
+		Date.now = () => time;
+		try {
+			EnterText('ab');
+			time += 1001;
+			EnterText('cd');
+			Undo();
+			assert.strictEqual(GetCellEditorText(), 'ab');
+			Redo();
+			assert.strictEqual(GetCellEditorText(), 'abcd');
+		} finally { Date.now = now; }
+	});
+
+	QUnit.test('Check autocomplete continues the typed word', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		cellEditor.options.autoComplete = ['Hello'];
+		cellEditor.options.autoCompleteLC = ['hello'];
+		cellEditor.objAutoComplete.clear();
+		EnterText('Hel');
+		assert.strictEqual(GetCellEditorText(), 'Hello');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'Hello');
+	});
+
+	QUnit.test('Check formula bar input groups words', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		const checkText = AscFonts.FontPickerByCharacter.checkText;
+		AscFonts.FontPickerByCharacter.checkText = (text, context, callback) => callback.call(context);
+		try {
+			for (const ch of 'Hello world') {
+				cellEditor.input.value = GetCellEditorText() + ch;
+				cellEditor.input.selectionStart = cellEditor.input.selectionEnd = cellEditor.input.value.length;
+				cellEditor._onInputTextArea({inputType: 'insertText'});
+			}
+			Undo();
+			assert.strictEqual(GetCellEditorText(), 'Hello ');
+			Redo();
+			assert.strictEqual(GetCellEditorText(), 'Hello world');
+		} finally { AscFonts.FontPickerByCharacter.checkText = checkText; }
+	});
+
+	QUnit.test('Check composition is undone and redone as one edit', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('ab');
+		cellEditor.Begin_CompositeInput();
+		cellEditor.Replace_CompositeText([0x4e2d]);
+		cellEditor.Replace_CompositeText([0x4e2d, 0x6587]);
+		cellEditor.End_CompositeInput();
+		assert.strictEqual(GetCellEditorText(), 'ab中文');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'ab中文');
+		Undo();
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '');
+	});
+
+	QUnit.test('Check cancelling composition preserves redo', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('abc');
+		Undo();
+		cellEditor.Begin_CompositeInput();
+		cellEditor.End_CompositeInput();
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'abc');
+		Undo();
+		cellEditor.Begin_CompositeInput();
+		cellEditor.Replace_CompositeText([0x4e2d]);
+		cellEditor.Replace_CompositeText([]);
+		cellEditor.End_CompositeInput();
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'abc');
+	});
+
+	QUnit.test('Check composition in an empty editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		cellEditor.Begin_CompositeInput();
+		cellEditor.Replace_CompositeText([0x4e2d]);
+		cellEditor.End_CompositeInput();
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), '中');
+	});
+
+	QUnit.test('Check composition restores a replaced selection', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('abc');
+		cellEditor._moveCursor(-11, 1);
+		cellEditor._selectChars(-11, 3);
+		cellEditor.Begin_CompositeInput();
+		cellEditor.Replace_CompositeText([0x4e2d]);
+		cellEditor.End_CompositeInput();
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'abc');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'a中');
+	});
+
+	QUnit.test('Check autocomplete does not swallow a rejected suggestion', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		cellEditor.options.autoComplete = ['Hello'];
+		cellEditor.options.autoCompleteLC = ['hello'];
+		cellEditor.objAutoComplete.clear();
+		EnterText('Hex');
+		assert.strictEqual(GetCellEditorText(), 'Hex');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'Hex');
+	});
+
+	QUnit.test('Check cursor movement breaks the typing group in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('Hello');
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.moveCursorLeftChar);
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.moveToRightChar);
+		EnterText('abc');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'Hello', 'Check undo of the text typed after the cursor returned to the same position');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo of the text typed before the cursor movement');
+	});
+
+	QUnit.test('Check typing inside the text is grouped separately in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('ad');
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.moveCursorLeftChar);
+		EnterText('bc');
+		assert.strictEqual(GetCellEditorText(), 'abcd', 'Check text');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ad', 'Check undo of the inserted group');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'abcd', 'Check redo of the inserted group');
+	});
+
+	QUnit.test('Check deletion breaks the typing group in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('Hello');
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.removeCharBack);
+		EnterText('p');
+		assert.strictEqual(GetCellEditorText(), 'Hellp', 'Check text');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'Hell', 'Check undo of the text typed after deletion');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'Hello', 'Check undo of the deletion');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo of the text typed before deletion');
+	});
+
+	QUnit.test('Check typing after undoing deletion starts a new group in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('ab');
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.removeCharBack);
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check undo restores the deleted character');
+		EnterText('c');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check undo removes only the new typing');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'abc', 'Check redo restores the new typing');
+		Undo();
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check the original word remains a separate undo step');
+	});
+
+	QUnit.test('Check typing after undoing rich text paste starts a new group in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('ab');
+		const fragment = cellEditor.options.fragments[0].clone();
+		fragment.setCharCodes([88, 89]);
+		fragment.format.setBold(true);
+		cellEditor.paste([fragment]);
+		assert.strictEqual(GetCellEditorText(), 'abXY', 'Check rich text is pasted');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check undo removes the pasted text');
+		EnterText('c');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check undo removes only the new typing');
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'abc', 'Check redo restores the new typing');
+	});
+
+	QUnit.test('Check Delete at the end breaks the typing group in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('ab');
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.deleteFrontChar);
+		EnterText('c');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check undo removes only the text typed after Delete');
+	});
+
+	QUnit.test('Check forward deletion breaks the typing group in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('abcd');
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.moveCursorLeftChar);
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.moveCursorLeftChar);
+		EnterText('x');
+		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.deleteFrontChar);
+		EnterText('y');
+		assert.strictEqual(GetCellEditorText(), 'abxyd', 'Check text');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'abxd', 'Check undo of the text typed after forward deletion');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'abxcd', 'Check undo of the forward deletion');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'abcd', 'Check undo of the text typed before forward deletion');
+	});
+
+	QUnit.test('Check format change breaks the typing group in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('ab');
+		cellEditor.setTextStyle('b', true);
+		EnterText('cd');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check undo of the bold text');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo of the regular text');
+
+		Redo();
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'abcd', 'Check redo of both groups');
+		const fragments = cellEditor.options.fragments;
+		assert.strictEqual(fragments.length, 2, 'Check redo keeps two fragments');
+		assert.notOk(fragments[0].format.getBold(), 'Check redo keeps the first group regular');
+		assert.ok(fragments[1].format.getBold(), 'Check redo keeps the second group bold');
+	});
+
+	QUnit.test('Check paste breaks the typing group in cell editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('ab');
+		cellEditor.pasteText('XY');
+		EnterText('cd');
+		assert.strictEqual(GetCellEditorText(), 'abXYcd', 'Check text');
+
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'abXY', 'Check undo of the text typed after paste');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check undo of the paste');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo of the text typed before paste');
+	});
+
+	QUnit.test('Check undo/redo in cell editor after group undo starts a new group', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('Hello');
+		Undo();
+		EnterText('ab');
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check text');
+
+		Redo();
+		assert.strictEqual(GetCellEditorText(), 'ab', 'Check typing clears the redo list');
+		Undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check undo of the new group');
+	});
+	QUnit.test('Check toolbar undo/redo in cell editor with empty workbook history', (assert) =>
+	{
+		AscCommon.History.Clear();
+		Select(0, 0, 0, 0, 0, 0);
+		EnterText('Hello');
+		assert.false(AscCommon.History.Can_Undo(), 'Check workbook history is empty');
+
+		wbView.undo();
+		assert.strictEqual(GetCellEditorText(), '', 'Check toolbar undo of the whole typed word');
+
+		wbView.redo();
+		assert.strictEqual(GetCellEditorText(), 'Hello', 'Check toolbar redo');
 	});
 	QUnit.test('Check switch reference of formula', (assert) =>
 	{
@@ -2029,5 +2371,655 @@ QUnit.config.autostart = false;
 
 		ExecuteCellEditorHotkey(cellEditorHotkeyTypes.moveToEndLine);
 		assert.strictEqual(cellEditor.cursorPos, 4, 'End moves to logical end (pos=4)');
+	});
+
+	QUnit.module('Cell editor autosave', {
+		beforeEach: function ()
+		{
+			wbView.collaborativeEditing.m_nUseType = 1;
+		},
+		afterEach: function ()
+		{
+			CloseCellEditor();
+			editor._cellEditorCheckpoint = false;
+		}
+	});
+
+	[false, true].forEach(function (fast)
+	{
+		QUnit.test('Send a pending checkpoint after the save delay, fast collaboration: ' + fast, (assert) =>
+		{
+			const DateOriginal = window.Date;
+			const askSaveOriginal = editor.CoAuthoringApi.askSaveChanges;
+			const lastSaveTimeOriginal = editor.lastSaveTime;
+			const collaboration = wbView.collaborativeEditing;
+			const fastOriginal = collaboration.getFast();
+			const useTypeOriginal = collaboration.m_nUseType;
+			const openedFrameOriginal = editor.isOpenedFrameEditor;
+			editor.isOpenedFrameEditor = false;
+			const askLock = function (locks, callback) { callback({lock: true}); };
+			collaboration.handlers.add('askLock', askLock);
+			collaboration.m_nUseType = 1;
+			let now = DateOriginal.now();
+			let saveRequests = 0;
+			let saveCallback;
+			window.Date = class extends DateOriginal {
+				constructor(...args) { super(...(args.length ? args : [now])); }
+				static now() { return now; }
+			};
+			editor.CoAuthoringApi.askSaveChanges = function (callback) { saveRequests++; saveCallback = callback; };
+			editor.lastSaveTime = null;
+			if (fast) {
+				collaboration.startCollaborationEditing();
+				collaboration.setFast(true);
+			}
+			try {
+				Select(0, 0, 0, 0, 0, 0);
+				FillActiveCell('before');
+				OpenCellEditor();
+				EnterText('after');
+				cellEditor.autosaveValue();
+				assert.strictEqual(GetCellText(0, 0), 'after', 'Checkpoint reached the workbook');
+				assert.true(!!editor._cellEditorCheckpoint, 'Pending marker created');
+				assert.true(editor._saveCheck(), 'Save preconditions met');
+				editor._autoSaveInner();
+				assert.strictEqual(saveRequests, 0, 'The normal save delay still applies');
+				now += 12000;
+				editor._autoSaveInner();
+				assert.strictEqual(saveRequests, 1, 'An unchanged pending checkpoint reaches the save lifecycle');
+				assert.true(cellEditor.isOpened, 'Sending keeps the editor open');
+				if (saveCallback) {
+					saveCallback({saveLock: true});
+					editor._autoSaveInner();
+					assert.strictEqual(saveRequests, 2, 'A busy save lock does not discard the pending checkpoint');
+				}
+			} finally {
+				window.Date = DateOriginal;
+				editor.CoAuthoringApi.askSaveChanges = askSaveOriginal;
+				editor.lastSaveTime = lastSaveTimeOriginal;
+				editor.canSave = true;
+				editor._cellEditorSaveInProgress = false;
+				if (fast) {
+					collaboration.endCollaborationEditing();
+					collaboration.setFast(fastOriginal);
+				}
+				collaboration.m_nUseType = useTypeOriginal;
+				collaboration.handlers.remove('askLock', askLock);
+				collaboration.m_arrNeedUnlock2.length = 0;
+				editor.isOpenedFrameEditor = openedFrameOriginal;
+			}
+		});
+	});
+
+	QUnit.test('Document autosave does not commit before the input debounce', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		FillActiveCell('before');
+		OpenCellEditor();
+		EnterText('unfinished');
+		editor._autoSaveInner();
+		cellEditor.close(false);
+		assert.strictEqual(GetCellText(0, 0), 'before', 'Esc before the pause discards the input');
+	});
+
+	QUnit.test('Resume checkpointing after typing during a regular document save', (assert) =>
+	{
+		const done = assert.async();
+		const collaboration = wbView.collaborativeEditing;
+		const sendChangesOriginal = collaboration.sendChanges;
+		const lastSaveTimeOriginal = editor.lastSaveTime;
+		const onUnSaveLockOriginal = editor.CoAuthoringApi.onUnSaveLock;
+		collaboration.sendChanges = function () {};
+		Select(0, 0, 0, 0, 0, 0);
+		FillActiveCell('before');
+		editor._cellEditorSaveInProgress = false;
+		editor.canSave = false;
+		editor._onSaveCallbackInner();
+		OpenCellEditor();
+		EnterText('after');
+		assert.strictEqual(GetCellText(0, 0), 'before', 'Typing does not mutate history during the save');
+		editor.CoAuthoringApi.onUnSaveLock();
+		window.setTimeout(function () {
+			try {
+				assert.strictEqual(GetCellText(0, 0), 'after', 'Save completion resumes the paused checkpoint');
+				assert.true(cellEditor.isOpened, 'The edit session stays open');
+			} finally {
+				collaboration.sendChanges = sendChangesOriginal;
+				editor.lastSaveTime = lastSaveTimeOriginal;
+				editor.CoAuthoringApi.onUnSaveLock = onUnSaveLockOriginal;
+				editor.canSave = true;
+				done();
+			}
+		}, 5100);
+	});
+
+	QUnit.test('Validate a checkpoint before changing the workbook', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		FillActiveCell('5');
+		const props = ws.getDataValidationProps();
+		props.setType(Asc.EDataValidationType.Whole);
+		props.setShowErrorMessage(true);
+		props.setFormula1(new Asc.CDataFormula('1'));
+		props.setFormula2(new Asc.CDataFormula('10'));
+		ws.setDataValidationProps(props);
+		const errors = [];
+		const onError = function (id) { errors.push(id); };
+		wb.handlers.add('asc_onError', onError);
+		try {
+			OpenCellEditor();
+			EnterText('99');
+			cellEditor.autosaveValue();
+			assert.strictEqual(GetCellText(0, 0), '5', 'Invalid input does not replace the cell');
+			assert.false(cellEditor._autosaveInProgress, 'Rejected checkpoint finishes its callback');
+			assert.deepEqual(errors, [], 'Background validation does not interrupt typing');
+			cellEditor.selectAll();
+			EnterText('7');
+			cellEditor.autosaveValue();
+			assert.strictEqual(GetCellText(0, 0), '7', 'Valid input can still be checkpointed');
+			cellEditor.selectAll();
+			EnterText('99');
+			cellEditor.autosaveValue();
+			cellEditor.close(false);
+			assert.strictEqual(GetCellText(0, 0), '7', 'Esc preserves the last valid checkpoint');
+		} finally {
+			wb.handlers.remove('asc_onError', onError);
+			ws.clearDataValidation([new Asc.Range(0, 0, 0, 0)], true);
+		}
+	});
+
+	QUnit.test('Checkpoint cannot overwrite part of a classic formula array', (assert) =>
+	{
+		const range = ws.getRange2('A1:A2');
+		ws.getRange2('B1').setValue('1');
+		ws.getRange2('B2').setValue('2');
+		range.setValue('=B1:B2', null, null, range.bbox);
+		Select(1, 0, 1, 0, 1, 0);
+		OpenCellEditor();
+		EnterText('replacement');
+		cellEditor.autosaveValue();
+		assert.false(cellEditor._autosaveInProgress, 'Rejected checkpoint finishes its callback');
+		cellEditor.close(false);
+		[0, 1].forEach(function (row) {
+			ws._getCell(row, 0, function (cell) {
+				assert.true(!!cell.formulaParsed, 'Array element retains its formula');
+				assert.true(!!cell.formulaParsed && cell.formulaParsed.ref.isEqual(range.bbox), 'Array range stays intact');
+			});
+		});
+		range.cleanAll();
+	});
+
+	[false, true].forEach(function (grant)
+	{
+		QUnit.test('Wait for the editing lock before checkpointing, granted: ' + grant, (assert) =>
+		{
+			const collaboration = wbView.collaborativeEditing;
+			let pendingLock;
+			const askLock = function (locks, callback) { pendingLock = callback; };
+			collaboration.handlers.add('askLock', askLock);
+			collaboration.startCollaborationEditing();
+			try {
+				Select(0, 0, 0, 0, 0, 0);
+				FillActiveCell('before');
+				OpenCellEditor();
+				EnterText('pending');
+				assert.strictEqual(typeof pendingLock, 'function', 'Editing lock is awaiting a server response');
+				assert.false(cellEditor.autosaveValue(), 'Pending lock forbids a checkpoint');
+				assert.strictEqual(GetCellText(0, 0), 'before', 'No value is written before permission');
+				pendingLock(grant ? {lock: true} : {error: 'locked'});
+				if (grant) {
+					assert.true(!!cellEditor._autosaveTimer, 'Lock grant schedules the pending input');
+					cellEditor.autosaveValue();
+					assert.strictEqual(GetCellText(0, 0), 'pending', 'Granted edit can be checkpointed');
+				} else {
+					assert.false(cellEditor.isOpened, 'Denied edit is closed');
+					assert.strictEqual(GetCellText(0, 0), 'before', 'Denied edit leaves the cell unchanged');
+				}
+			} finally {
+				collaboration.handlers.remove('askLock', askLock);
+				collaboration.Set_GlobalLock(false);
+				collaboration.m_arrNeedUnlock2.length = 0;
+				collaboration.endCollaborationEditing();
+			}
+		});
+	});
+
+	QUnit.test('Save a text snapshot without closing the editor', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('saved');
+		cellEditor._moveCursor(-4);
+		cellEditor._selectChars(1, 3);
+		const cursorPos = cellEditor.cursorPos;
+		const selectionBegin = cellEditor.selectionBegin;
+		const selectionEnd = cellEditor.selectionEnd;
+		const undoCount = cellEditor.undoList.length;
+		const fragments = cellEditor.options.fragments;
+
+		assert.true(cellEditor.autosaveValue(), 'Changed text starts a checkpoint');
+		assert.strictEqual(GetCellText(0, 0), 'saved', 'The workbook contains current text');
+		assert.true(cellEditor.isOpened, 'The editor remains open');
+		assert.strictEqual(GetCellEditorText(), 'saved', 'The editor still has its original text');
+		assert.strictEqual(cellEditor.cursorPos, cursorPos, 'Cursor position is unchanged');
+		assert.strictEqual(cellEditor.selectionBegin, selectionBegin, 'Selection start is unchanged');
+		assert.strictEqual(cellEditor.selectionEnd, selectionEnd, 'Selection end is unchanged');
+		assert.strictEqual(cellEditor.undoList.length, undoCount, 'Editor undo list is unchanged');
+		assert.strictEqual(cellEditor.redoList.length, 0, 'Editor redo list is unchanged');
+		assert.strictEqual(cellEditor.options.fragments, fragments, 'Editor fragments are not replaced');
+
+		assert.false(cellEditor.autosaveValue(), 'An unchanged text needs no new checkpoint');
+		assert.strictEqual(GetCellEditorText(), 'saved', 'Deduplication does not change editor text');
+	});
+
+	QUnit.test('Keep the cell lock while sending an intermediate checkpoint', (assert) =>
+	{
+		const collaboration = wbView.collaborativeEditing;
+		const lockInfo = collaboration.getLockInfo(AscCommonExcel.c_oAscLockTypeElem.Range, null, ws.Id,
+			new AscCommonExcel.asc_CCollaborativeRange(0, 0, 0, 0));
+		const lock = new AscCommonExcel.CLock(lockInfo);
+		lock.setType(AscCommon.c_oAscLockTypes.kLockTypeMine);
+		const releasedLocks = [];
+		collaboration.startCollaborationEditing();
+		collaboration.addUnlock2(lock);
+		const releaseLocksHandler = function (guid)
+		{
+			releasedLocks.push(guid);
+		};
+		collaboration.handlers.add('releaseLocks', releaseLocksHandler);
+		AscCommon.History.Clear();
+
+		collaboration.sendChanges(undefined, undefined, undefined, true);
+		assert.strictEqual(collaboration.m_arrNeedUnlock2.length, 1, 'The checkpoint retains the own lock');
+		assert.strictEqual(lock.getType(), AscCommon.c_oAscLockTypes.kLockTypeMine, 'The cell remains locked by us');
+		assert.deepEqual(releasedLocks, [], 'The checkpoint does not release the cell');
+		const saveChangesOriginal = editor.CoAuthoringApi.saveChanges;
+		const isDocumentLoadCompleteOriginal = editor.isDocumentLoadComplete;
+		editor.isDocumentLoadComplete = true;
+		let releaseLocks;
+		editor.CoAuthoringApi.saveChanges = function (arrayChanges, deleteIndex, additionalInfo, canUnlock, canRelease)
+		{
+			releaseLocks = canRelease;
+		};
+		editor._onSaveChanges(undefined, undefined, undefined, ['change'], true);
+		assert.strictEqual(releaseLocks, false, 'The transport also retains collaborative locks');
+		editor.CoAuthoringApi.saveChanges = saveChangesOriginal;
+		editor.isDocumentLoadComplete = isDocumentLoadCompleteOriginal;
+
+		collaboration.sendChanges();
+		assert.strictEqual(collaboration.m_arrNeedUnlock2.length, 0, 'Normal sending releases the lock');
+		assert.deepEqual(releasedLocks, [lockInfo.guid], 'The lock is released on the final send');
+		collaboration.handlers.remove('releaseLocks', releaseLocksHandler);
+		collaboration.endCollaborationEditing();
+	});
+
+	QUnit.test('Keep transport locks during an intermediate document save', (assert) =>
+	{
+		const coAuthoringApi = new AscCommon.CDocsCoApi();
+		coAuthoringApi._onlineWork = true;
+		coAuthoringApi._CoAuthoringApi._locks = {cell: {state: 2}};
+		let message;
+		coAuthoringApi._CoAuthoringApi._send = function (data)
+		{
+			message = data;
+		};
+		coAuthoringApi.saveChanges([], null, null, false, false);
+		const lock = coAuthoringApi._CoAuthoringApi._locks.cell;
+		assert.strictEqual(!!lock, true, 'The transport retains its own cell lock');
+		assert.strictEqual(message.releaseLocks, false, 'The outgoing message forbids lock release');
+		clearTimeout(coAuthoringApi._CoAuthoringApi.saveCallbackErrorTimeOutId);
+		coAuthoringApi.saveChanges([], null, null, false, true);
+		assert.strictEqual(coAuthoringApi._CoAuthoringApi._locks.cell, undefined, 'Normal save still releases the transport lock');
+		assert.strictEqual(message.releaseLocks, true, 'Normal save retains the original protocol');
+		clearTimeout(coAuthoringApi._CoAuthoringApi.saveCallbackErrorTimeOutId);
+	});
+
+	QUnit.test('Debounce checkpoints after real text changes', (assert) =>
+	{
+		const timers = [];
+		const setTimeoutOriginal = window.setTimeout;
+		const clearTimeoutOriginal = window.clearTimeout;
+		window.setTimeout = function (callback, delay)
+		{
+			const timer = {callback: callback, delay: delay, cleared: false};
+			timers.push(timer);
+			return timer;
+		};
+		window.clearTimeout = function (timer)
+		{
+			timer.cleared = true;
+		};
+		try
+		{
+			Select(0, 0, 0, 0, 0, 0);
+			OpenCellEditor();
+			EnterText('h');
+			assert.true(!!cellEditor._autosaveTimer, 'Text input schedules a checkpoint');
+			assert.strictEqual(cellEditor._autosaveTimer.delay, 5000, 'Checkpoint waits five seconds after input');
+			const firstTimer = cellEditor._autosaveTimer;
+			EnterText('i');
+			assert.true(firstTimer.cleared, 'New input resets the previous timer');
+			assert.notStrictEqual(cellEditor._autosaveTimer, firstTimer, 'Only the latest timer is active');
+			cellEditor._autosaveTimer.callback();
+			assert.strictEqual(GetCellText(0, 0), 'hi', 'The timer saves the latest text');
+			assert.true(cellEditor.isOpened, 'The timer does not close the editor');
+		}
+		finally
+		{
+			window.setTimeout = setTimeoutOriginal;
+			window.clearTimeout = clearTimeoutOriginal;
+			CloseCellEditor();
+		}
+	});
+
+	QUnit.test('Esc keeps the last checkpoint and discards later text', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('saved');
+		cellEditor.autosaveValue();
+		EnterText(' later');
+		cellEditor.close(false);
+		assert.strictEqual(GetCellText(0, 0), 'saved', 'Esc discards only the unsaved suffix');
+	});
+
+	QUnit.test('Keep typing while a checkpoint is pending', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('first');
+		const saveValueCallback = cellEditor.options.saveValueCallback;
+		let pendingCallback;
+		cellEditor.options.saveValueCallback = function (fragments, flags, callback)
+		{
+			pendingCallback = callback;
+		};
+		assert.true(cellEditor.autosaveValue(), 'The first checkpoint is pending');
+		EnterText(' second');
+		assert.false(cellEditor.autosaveValue(), 'A second checkpoint cannot overlap the first');
+		pendingCallback(true);
+		assert.strictEqual(GetCellEditorText(), 'first second', 'Completion does not overwrite new input');
+		assert.true(!!cellEditor._autosaveTimer, 'The new suffix is scheduled after completion');
+		cellEditor.options.saveValueCallback = saveValueCallback;
+	});
+
+	QUnit.test('Checkpoint deleting the cell text', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		FillActiveCell('before');
+		OpenCellEditor();
+		cellEditor.empty();
+		assert.true(cellEditor.autosaveValue(), 'Deleting the text starts a checkpoint');
+		assert.strictEqual(GetCellText(0, 0), '', 'The cell is cleared in the workbook');
+	});
+
+	QUnit.test('Do not checkpoint formulas', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		FillActiveCell('original');
+		OpenCellEditor();
+		cellEditor.empty();
+		EnterText('=1+');
+		assert.false(cellEditor.autosaveValue(), 'An incomplete formula is not sent');
+		assert.strictEqual(GetCellText(0, 0), 'original', 'Original workbook value is unchanged');
+	});
+	['+1+2', '-A1'].forEach(function (text)
+	{
+		QUnit.test('Do not checkpoint formula-like text: ' + text, (assert) =>
+		{
+			Select(0, 0, 0, 0, 0, 0);
+			FillActiveCell('original');
+			OpenCellEditor();
+			cellEditor.empty();
+			EnterText(text);
+			assert.false(cellEditor.autosaveValue(), 'Formula-like text is not sent');
+			assert.strictEqual(GetCellText(0, 0), 'original', 'Original value is preserved');
+		});
+	});
+
+	QUnit.test('Skip incomplete input modes and cancel timer on close', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('partial');
+		const isMobileVersion = editor.isMobileVersion;
+		const isNativeEditor = window['IS_NATIVE_EDITOR'];
+		try
+		{
+			cellEditor.Begin_CompositeInput();
+			assert.false(cellEditor.autosaveValue(), 'IME composition is not committed');
+			cellEditor.End_CompositeInput();
+
+			cellEditor._clearAutosaveTimer();
+			editor.isMobileVersion = true;
+			cellEditor._scheduleAutosave();
+			assert.false(!!cellEditor._autosaveTimer, 'Mobile editor does not schedule an intermediate commit');
+			editor.isMobileVersion = false;
+
+			window['IS_NATIVE_EDITOR'] = true;
+			assert.false(cellEditor.autosaveValue(), 'Native editor does not commit unsupported partial input');
+		}
+		finally
+		{
+			editor.isMobileVersion = isMobileVersion;
+			window['IS_NATIVE_EDITOR'] = isNativeEditor;
+		}
+	});
+
+	QUnit.test('Cancel a pending checkpoint on close', (assert) =>
+	{
+		const setTimeoutOriginal = window.setTimeout;
+		const clearTimeoutOriginal = window.clearTimeout;
+		window.setTimeout = function (callback, delay)
+		{
+			return {callback: callback, delay: delay, cleared: false};
+		};
+		window.clearTimeout = function (timer)
+		{
+			timer.cleared = true;
+		};
+		try
+		{
+			Select(0, 0, 0, 0, 0, 0);
+			OpenCellEditor();
+			EnterText('partial');
+			const timer = cellEditor._autosaveTimer;
+			cellEditor.close(false);
+			assert.true(timer.cleared, 'Closing cancels the pending callback');
+			assert.strictEqual(cellEditor._autosaveTimer, null, 'Closing releases the timer reference');
+		}
+		finally
+		{
+			window.setTimeout = setTimeoutOriginal;
+			window.clearTimeout = clearTimeoutOriginal;
+		}
+	});
+
+	QUnit.test('Autosave sends a checkpoint without releasing the cell', (assert) =>
+	{
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('shared');
+		const collaboration = wbView.collaborativeEditing;
+		const sendChangesOriginal = collaboration.sendChanges;
+		const askSaveOriginal = editor.CoAuthoringApi.askSaveChanges;
+		const lastSaveTimeOriginal = editor.lastSaveTime;
+		const waitOriginal = editor.intervalWaitAutoSave;
+		const saveCheckOriginal = editor._saveCheck;
+		const calls = [];
+		collaboration.sendChanges = function ()
+		{
+			calls.push(Array.prototype.slice.call(arguments));
+		};
+		editor.CoAuthoringApi.askSaveChanges = function (callback)
+		{
+			calls.askSave = callback;
+		};
+		editor.intervalWaitAutoSave = 0;
+		editor.lastSaveTime = new Date(0);
+		editor.isDocumentCanSave = true;
+		editor._saveCheck = function ()
+		{
+			return true;
+		};
+		try
+		{
+			cellEditor.autosaveValue();
+			editor._autoSaveInner();
+			assert.strictEqual(typeof calls.askSave, 'function', 'The normal document save lifecycle is requested');
+			assert.true(cellEditor.isOpened, 'The autosave preparation keeps the editor open');
+			assert.strictEqual(calls.length, 0, 'Changes are sent only after the save lock is granted');
+			assert.true(editor.canSave === false, 'Save progress remains tracked normally');
+
+			calls.askSave({saveLock: false});
+			assert.strictEqual(calls.length, 1, 'Granted save sends the checkpoint');
+			assert.strictEqual(calls[0][3], true, 'The save sends without releasing the cell lock');
+			assert.true(cellEditor.isOpened, 'The editor remains open after the save request');
+			editor.CoAuthoringApi.onUnSaveLock();
+			assert.true(editor.canSave, 'Normal save completion unlocks subsequent saves');
+		}
+		finally
+		{
+			collaboration.sendChanges = sendChangesOriginal;
+			editor.CoAuthoringApi.askSaveChanges = askSaveOriginal;
+			editor.CoAuthoringApi.onUnSaveLock = null;
+			editor.lastSaveTime = lastSaveTimeOriginal;
+			editor.intervalWaitAutoSave = waitOriginal;
+			editor._saveCheck = saveCheckOriginal;
+			editor.canSave = true;
+		}
+	});
+
+	[false, true].forEach(function (typeDuringSave)
+	{
+		QUnit.test('Saved cell status with an open editor, typing during save: ' + typeDuringSave, (assert) =>
+		{
+			const openedFrameOriginal = editor.isOpenedFrameEditor;
+			editor.isOpenedFrameEditor = false;
+			const history = AscCommon.History;
+			const collaboration = wbView.collaborativeEditing;
+			const sendChangesOriginal = collaboration.sendChanges;
+			const triggerOriginal = editor.handlers.trigger;
+			const onUnSaveLockOriginal = editor.CoAuthoringApi.onUnSaveLock;
+			let modified;
+			editor.handlers.trigger = function (name, value)
+			{
+				if (name === 'asc_onDocumentModifiedChanged') {
+					modified = value;
+				}
+				return triggerOriginal.apply(this, arguments);
+			};
+			collaboration.sendChanges = function () { history.Reset_SavedIndex(true); };
+			try
+			{
+				Select(0, 0, 0, 0, 0, 0);
+				FillActiveCell('before');
+				history.Reset_SavedIndex(true);
+				OpenCellEditor();
+				EnterText('checkpoint');
+				assert.true(editor.asc_isDocumentModified(), 'Uncommitted input requires an unload warning');
+				cellEditor.autosaveValue();
+				assert.true(editor.asc_isDocumentModified(), 'A local checkpoint is not yet saved on the server');
+				editor.canSave = false;
+				editor._cellEditorSaveInProgress = true;
+				editor._onSaveCallbackInner();
+				assert.true(editor.asc_isDocumentModified(), 'Keep the warning until the save completes');
+				if (typeDuringSave) {
+					EnterText(' suffix');
+				}
+				editor.CoAuthoringApi.onUnSaveLock();
+				assert.strictEqual(editor.asc_isDocumentModified(), typeDuringSave, 'Only newer input keeps the unload warning');
+				assert.strictEqual(modified, typeDuringSave, 'The status notification agrees with the unload guard');
+				assert.strictEqual(editor.asc_isDocumentCanSave(), typeDuringSave, 'The save button reflects outstanding input');
+				assert.true(cellEditor.isOpened, 'Reporting a saved state does not close the cell');
+				if (!typeDuringSave) {
+					EnterText(' new');
+					assert.true(editor.asc_isDocumentModified(), 'Typing again restores the unload warning');
+					assert.true(modified, 'Typing again immediately updates the status');
+				}
+				cellEditor.close(false);
+				assert.false(editor.asc_isDocumentModified(), 'Esc removes only the unsaved suffix');
+				assert.false(modified, 'Esc restores the saved status');
+			}
+			finally
+			{
+				collaboration.sendChanges = sendChangesOriginal;
+				editor.handlers.trigger = triggerOriginal;
+				editor.CoAuthoringApi.onUnSaveLock = onUnSaveLockOriginal;
+				editor.canSave = true;
+				editor._cellEditorSaveInProgress = false;
+				editor.isOpenedFrameEditor = openedFrameOriginal;
+			}
+		});
+	});
+
+	QUnit.test('Formatting and formula input still require an unload warning after a checkpoint', (assert) =>
+	{
+		const openedFrameOriginal = editor.isOpenedFrameEditor;
+		editor.isOpenedFrameEditor = false;
+		Select(0, 0, 0, 0, 0, 0);
+		OpenCellEditor();
+		EnterText('saved');
+		cellEditor.autosaveValue();
+		AscCommon.History.Reset_SavedIndex(true);
+		assert.false(editor.asc_isDocumentModified(), 'An unchanged saved checkpoint is clean');
+		cellEditor.selectAll();
+		ExecuteShortcut(Asc.c_oAscSpreadsheetShortcutType.Bold);
+		assert.strictEqual(GetCellEditorText(), 'saved', 'Formatting does not change the text');
+		assert.true(editor.asc_isDocumentModified(), 'Unsaved formatting must not be mistaken for saved text');
+		cellEditor.selectAll();
+		EnterText('=SUM(');
+		assert.false(cellEditor.autosaveValue(), 'Incomplete formulas cannot be checkpointed');
+		assert.true(editor.asc_isDocumentModified(), 'An incomplete formula still needs the warning');
+		editor.isOpenedFrameEditor = openedFrameOriginal;
+	});
+
+	QUnit.test('Keep the ordinary save path after skipped intermediate input', (assert) =>
+	{
+		const askSaveOriginal = editor.CoAuthoringApi.askSaveChanges;
+		const saveCheckOriginal = editor._saveCheck;
+		const lastSaveTimeOriginal = editor.lastSaveTime;
+		const waitOriginal = editor.intervalWaitAutoSave;
+		const prepareSaveOriginal = editor._prepareSave;
+		let intermediatePreparation;
+		editor.CoAuthoringApi.askSaveChanges = function () {};
+		editor._saveCheck = function ()
+		{
+			return true;
+		};
+		editor.lastSaveTime = new Date(0);
+		editor.intervalWaitAutoSave = 0;
+		editor._prepareSave = function (isIdle)
+		{
+			prepareSaveOriginal.call(this, isIdle);
+			if (!this.IsUserSave) {
+				intermediatePreparation = true;
+			}
+		};
+		try
+		{
+			Select(0, 0, 0, 0, 0, 0);
+			FillActiveCell('original');
+			OpenCellEditor();
+			cellEditor.empty();
+			EnterText('=1+2');
+			editor._autoSaveInner();
+			assert.false(!!intermediatePreparation, 'No checkpoint is prepared for a formula');
+			assert.strictEqual(GetCellText(0, 0), 'original', 'Autosave does not commit formula text');
+
+			editor.asc_Save(false);
+			assert.false(cellEditor.isOpened, 'Manual save still finishes the formula edit normally');
+			assert.false(!!editor._cellEditorSaveInProgress, 'Manual save is not marked as intermediate');
+		}
+		finally
+		{
+			editor.CoAuthoringApi.askSaveChanges = askSaveOriginal;
+			editor.CoAuthoringApi.onUnSaveLock = null;
+			editor.canSave = true;
+			editor.lastSaveTime = lastSaveTimeOriginal;
+			editor.intervalWaitAutoSave = waitOriginal;
+			editor._saveCheck = saveCheckOriginal;
+			editor._prepareSave = prepareSaveOriginal;
+		}
 	});
 })(window);

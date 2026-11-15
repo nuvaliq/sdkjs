@@ -865,6 +865,7 @@
               }, "updateUndoRedoChanged": function (bCanUndo, bCanRedo) {
 				  self.handlers.trigger("asc_onCanUndoChanged", bCanUndo);
 				  self.handlers.trigger("asc_onCanRedoChanged", bCanRedo);
+				  self.Api.CheckChangedDocument();
 			  }, "applyCloseEvent": function () {
 				  return self.controller._onWindowKeyDown.apply(self.controller, arguments);
 			  }, "canEdit": function () {
@@ -2251,6 +2252,7 @@
     };
 
     var editLockCallback = function(res) {
+      t.cellEditor._editLockPending = false;
       if (!res) {
         t.setCellEditMode(false);
         t.input.disabled = true;
@@ -2259,6 +2261,8 @@
         t.collaborativeEditing.onStopEditCell();
         t.cellEditor.close(false);
         t._onWSSelectionChanged();
+      } else {
+        t.cellEditor._scheduleAutosave();
       }
     };
 
@@ -2268,6 +2272,7 @@
 		}
     	// Start editing the cell
 		activeCellRange = ws.expandActiveCellByFormulaArray(activeCellRange);
+		t.cellEditor._editLockPending = true;
 		if (ws._isLockedCells(activeCellRange, /*subType*/null, editLockCallback)) {
 			editFunction();
 		}
@@ -3498,7 +3503,7 @@
     if (true === AscCommon.CollaborativeEditing.Get_GlobalLock())
       return;
 
-	  if (true !== this.History.Can_Undo() && this.Api && this.CollaborativeEditing && true === this.CollaborativeEditing.Is_Fast() && true !== this.CollaborativeEditing.Is_SingleUser())
+	  if (true !== this.History.Can_Undo() && true !== this.getCellEditMode() && this.Api && this.CollaborativeEditing && true === this.CollaborativeEditing.Is_Fast() && true !== this.CollaborativeEditing.Is_SingleUser())
 	  {
 		  if (this.CollaborativeEditing.CanUndo() && true === this.Api.canSave)
 		  {
@@ -3508,7 +3513,7 @@
 	  }
 	  else
 	  {
-		  if (this.History.Can_Undo())
+		  if (this.History.Can_Undo() || this.getCellEditMode())
 		  {
 			  this.Api.sendEvent("asc_onBeforeUndoRedo");
 			  var oFormulaLocaleInfo = AscCommonExcel.oFormulaLocaleInfo;

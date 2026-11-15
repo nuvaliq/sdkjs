@@ -7593,6 +7593,17 @@ background-repeat: no-repeat;\
 
 	asc_docs_api.prototype.EndDemonstration = function(isNoUseFullScreen)
 	{
+		var manager = this.WordControl && this.WordControl.DemonstrationManager;
+		if (!window["AscDesktopEditor"] && this.isReporterMode && (!manager || !manager.Mode))
+		{
+			if (!this.reporterCancelRequested)
+			{
+				this.reporterCancelRequested = true;
+				this.sendFromReporter(JSON.stringify({"reporter_command": "end"}));
+				window.close();
+			}
+			return;
+		}
 		let oAnnotations = this.getAnnotations();
 		if(oAnnotations && !oAnnotations.isEmpty())
 		{
@@ -7606,8 +7617,15 @@ background-repeat: no-repeat;\
 		}
 	};
 
+	asc_docs_api.prototype.asc_getReporterAuth = function()
+	{
+		return this.CoAuthoringApi.getAuthToken();
+	};
+
 	asc_docs_api.prototype.DemonstrationReporterStart = function(startObject)
 	{
+		if (!window["AscDesktopEditor"])
+			this.DemonstrationReporterEnd();
 		this.reporterStartObject = startObject;
 		this.reporterStartObject["translate"] = AscCommon.translateManager.mapTranslate;
 		this.reporterStartObject["skin"] = AscCommon.GlobalSkin;
@@ -7634,32 +7652,32 @@ background-repeat: no-repeat;\
 		var _url = "index.reporter.html";
 		if (this.locale)
 			_url += ("?lang=" + this.locale);
+		_url += (_url.indexOf("?") === -1 ? "?" : "&") + "reporterEndLabel=" + encodeURIComponent(startObject["translations"]["endSlideshow"]);
+		var state = this.reporterState = {window: null, origin: window.location.origin, metadataSent: false, showStarted: false, closing: false, closeRequested: false, closeTimer: null};
+		this.reporterMessageHandler = this.DemonstrationReporterMessages.bind(this);
+		window.addEventListener("message", this.reporterMessageHandler, false);
 		this.reporterWindow = window.open(_url, "_blank", "resizable=yes,status=0,toolbar=0,location=0,menubar=0,directories=0,scrollbars=0," + _windowPos);
-
+		state.window = this.reporterWindow;
 		if (!this.reporterWindow)
-			return;
-
-		this.reporterWindowCounter = 0;
-		if (!AscCommon.AscBrowser.isSafariMacOs)
 		{
-			this.reporterWindow.onbeforeunload = function ()
-			{
-				window.editor.EndDemonstration();
-			};
+			this.DemonstrationReporterEnd();
+			return;
 		}
 
-		this.reporterWindow.onunload = function () {
-			window.editor.reporterWindowCounter++;
-			if (1 < window.editor.reporterWindowCounter)
+		var api = this;
+		var onClose = function() {
+			if (api.reporterState === state && !state.closing && !state.closeRequested)
 			{
-				window.editor.EndDemonstration();
+				state.closeRequested = true;
+				clearInterval(state.closeTimer);
+				state.closeTimer = null;
+				api.EndDemonstration();
 			}
 		};
-
-		if ( this.reporterWindow.attachEvent )
-			this.reporterWindow.attachEvent('onmessage', this.DemonstrationReporterMessages);
-		else
-			this.reporterWindow.addEventListener('message', this.DemonstrationReporterMessages, false);
+		this.reporterWindow.onbeforeunload = onClose;
+		state.closeTimer = setInterval(function() {
+			if (state.window.closed) onClose();
+		}, 500);
 	};
 
 	asc_docs_api.prototype.DemonstrationReporterEnd = function()
@@ -7671,48 +7689,52 @@ background-repeat: no-repeat;\
 			return;
 		}
 
-		try
+		var state = this.reporterState;
+		if (state)
 		{
-			this.reporterWindowCounter = 0;
-			if (!this.reporterWindow)
-				return;
-
-			if (this.reporterWindow.attachEvent)
-				this.reporterWindow.detachEvent('onmessage', this.DemonstrationReporterMessages);
-			else
-				this.reporterWindow.removeEventListener('message', this.DemonstrationReporterMessages, false);
-
-			this.reporterWindow.close();
-			this.reporterWindow = null;
-			this.reporterStartObject = null;
+			state.closing = true;
+			clearInterval(state.closeTimer);
+			state.closeTimer = null;
 		}
-		catch (err)
+		this.reporterState = null;
+		if (this.reporterMessageHandler)
+			window.removeEventListener("message", this.reporterMessageHandler, false);
+		this.reporterMessageHandler = null;
+		var reporter = this.reporterWindow;
+		this.reporterWindow = null;
+		this.reporterStartObject = null;
+		if (reporter)
 		{
-			this.reporterWindow = null;
-			this.reporterStartObject = null;
+			try
+			{
+				reporter.onbeforeunload = null;
+				reporter.onunload = null;
+				reporter.close();
+			}
+			catch (err) {}
 		}
 	};
 
 	asc_docs_api.prototype.DemonstrationReporterMessages = function(e)
 	{
-		var _this = window.editor;
-		if ( e.data == 'i:am:ready' )
+		var _this = window["AscDesktopEditor"] ? window.editor : this;
+		var state = _this.reporterState;
+		if (!window["AscDesktopEditor"] && (!state || state.closing || state.closeRequested || !state.window || e.source !== state.window || e.origin !== state.origin))
+			return;
+		if (e.data === 'i:am:ready')
 		{
-			var _msg_ = {
-				type: 'file:open',
-				data: _this.reporterStartObject
-			};
-
+			if (!_this.reporterStartObject || (state && state.metadataSent))
+				return;
+			if (state) state.metadataSent = true;
+			var data = _this.reporterStartObject;
+			_this.reporterStartObject = null;
 			if (AscCommon.EncryptionWorker.isPasswordCryptoPresent)
 			{
-                _msg_.data["cryptoCurrentPassword"] = this.currentPassword;
-                _msg_.data["cryptoCurrentDocumentHash"] = this.currentDocumentHash;
-                _msg_.data["cryptoCurrentDocumentInfo"] = this.currentDocumentInfo;
-            }
-
-			this.reporterStartObject = null;
-			_this.sendToReporter(JSON.stringify(_msg_));
-
+				data["cryptoCurrentPassword"] = _this.currentPassword;
+				data["cryptoCurrentDocumentHash"] = _this.currentDocumentHash;
+				data["cryptoCurrentDocumentInfo"] = _this.currentDocumentInfo;
+			}
+			_this.sendToReporter(JSON.stringify({type: 'file:open', data: data}));
 			return;
 		}
 
@@ -7727,6 +7749,12 @@ background-repeat: no-repeat;\
 			{
 				case "end":
 				{
+					if (state)
+					{
+						state.closeRequested = true;
+						clearInterval(state.closeTimer);
+						state.closeTimer = null;
+					}
 					_this.EndDemonstration();
 					break;
 				}
@@ -7747,6 +7775,11 @@ background-repeat: no-repeat;\
 				}
 				case "start_show":
 				{
+					if (state)
+					{
+						if (!state.metadataSent || state.showStarted) return;
+						state.showStarted = true;
+					}
 					_this.WordControl.DemonstrationManager.EndWaitReporter();
 					break;
 				}
@@ -7902,8 +7935,9 @@ background-repeat: no-repeat;\
 			return;
 		}
 
-		if (this.reporterWindow)
-			this.reporterWindow.postMessage(value, "*");
+		var state = this.reporterState;
+		if (state && !state.closing && state.window && !state.window.closed)
+			state.window.postMessage(value, state.origin);
 	};
 
 	asc_docs_api.prototype.sendFromReporter = function(value)
@@ -7917,12 +7951,17 @@ background-repeat: no-repeat;\
 			return;
 		}
 
-		window.postMessage(value, "*");
+		if (!this.isReporterMode) return;
+		var opener = window.opener;
+		if (opener && !opener.closed)
+			opener.postMessage(value, window.location.origin);
 	};
 
 	asc_docs_api.prototype.DemonstrationToReporterMessages = function(e)
 	{
 		var _this = window.editor;
+		if (!window["AscDesktopEditor"] && (!_this.isReporterMode || e.source !== window.opener || e.origin !== window.location.origin))
+			return;
 
 		try
 		{
@@ -10056,6 +10095,7 @@ background-repeat: no-repeat;\
 	asc_docs_api.prototype['asc_isOffline']                       = asc_docs_api.prototype.asc_isOffline;
 	asc_docs_api.prototype['asc_getUrlType']                      = asc_docs_api.prototype.asc_getUrlType;
 	asc_docs_api.prototype['asc_prepareUrl']                      = asc_docs_api.prototype.asc_prepareUrl;
+	asc_docs_api.prototype['asc_getReporterAuth'] = asc_docs_api.prototype.asc_getReporterAuth;
 	asc_docs_api.prototype['asc_getSessionToken']                 = asc_docs_api.prototype.asc_getSessionToken;
 	asc_docs_api.prototype["asc_setInterfaceDrawImagePlaceShape"] = asc_docs_api.prototype.asc_setInterfaceDrawImagePlaceShape;
 	asc_docs_api.prototype["asc_nativeInitBuilder"]               = asc_docs_api.prototype.asc_nativeInitBuilder;

@@ -9559,13 +9559,19 @@ ParaRun.prototype.ApplyFontFamily = function(sFontName)
 //-----------------------------------------------------------------------------------
 ParaRun.prototype.Check_HistoryUninon = function(Data1, Data2)
 {
-	return (AscDFH.historyitem_ParaRun_AddItem === Data1.Type
-		&& AscDFH.historyitem_ParaRun_AddItem === Data2.Type
-		&& 1 === Data1.Items.length
-		&& 1 === Data2.Items.length
-		&& Data1.Pos === Data2.Pos - 1
-		&& ((Data1.Items[0].IsText() && Data2.Items[0].IsText())
-			|| (Data1.Items[0].IsSpace() && Data2.Items[0].IsSpace())));
+	if (AscDFH.historyitem_ParaRun_AddItem !== Data1.Type
+		|| AscDFH.historyitem_ParaRun_AddItem !== Data2.Type
+		|| 1 !== Data1.Items.length
+		|| 1 !== Data2.Items.length
+		|| Data1.Pos !== Data2.Pos - 1)
+		return false;
+
+	// A typed word is merged with the spaces before it, so that one undo step removes them together.
+	// A space after the word starts a new group.
+	let item1 = Data1.Items[0];
+	let item2 = Data2.Items[0];
+	return ((item1.IsText() || item1.IsSpace()) && item2.IsText())
+		|| (item1.IsSpace() && item2.IsSpace());
 };
 //-----------------------------------------------------------------------------------
 // Функции для совместного редактирования

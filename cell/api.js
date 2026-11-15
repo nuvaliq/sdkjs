@@ -401,6 +401,10 @@ var editor;
 	  return this.collaborativeEditing.haveOtherChanges();
     };
 	spreadsheet_api.prototype._prepareSave = function (isIdle) {
+		this._cellEditorSaveInProgress = !this.IsUserSave && this._cellEditorCheckpoint && this.asc_getCellEditMode();
+		if (this._cellEditorSaveInProgress) {
+			return true;
+		}
 		var tmpHandlers;
 		if (isIdle) {
 			tmpHandlers = this.wbModel.handlers.handlers['asc_onError'];
@@ -1692,9 +1696,13 @@ var editor;
     }
   };
 
+	spreadsheet_api.prototype._hasUncommittedCellChanges = function () {
+		return this.asc_getCellEditMode() && (!this.wb.cellEditor || this.wb.cellEditor.hasUnsavedChanges());
+	};
+
   spreadsheet_api.prototype.asc_isDocumentModified = function() {
-    if (!this.canSave || this.asc_getCellEditMode() || this.isOpenedFrameEditor) {
-      // While saving or editing a cell is in progress, we don't close the document
+    if (!this.canSave || this._hasUncommittedCellChanges() || this.isOpenedFrameEditor) {
+      // Warn while saving or while the open editor contains uncommitted changes.
       return true;
     } else if (History && History.Have_Changes) {
       return History.Have_Changes();
@@ -3038,7 +3046,7 @@ var editor;
     };
   };
 
-  spreadsheet_api.prototype._onSaveChanges = function(recalcIndexColumns, recalcIndexRows, isAfterAskSave, arrChanges) {
+  spreadsheet_api.prototype._onSaveChanges = function(recalcIndexColumns, recalcIndexRows, isAfterAskSave, arrChanges, isCellAutosave) {
     if (this.isDocumentLoadComplete) {
 		let arrChangesaSerializable = null;
 		let deleteIndex = null;
@@ -3075,7 +3083,7 @@ var editor;
 		  if (arrChangesaSerializable) {
 			  this.collaborativeEditing.CoHistory.AddOwnChanges(arrChangesaSerializable, deleteIndex);
 		  }
-        this.CoAuthoringApi.saveChanges(arrChanges, deleteIndex, excelAdditionalInfo, this.canUnlockDocument2, bCollaborative);
+        this.CoAuthoringApi.saveChanges(arrChanges, deleteIndex, excelAdditionalInfo, this.canUnlockDocument2, bCollaborative && !isCellAutosave);
         History.CanNotAddChanges = true;
       } else {
         this.CoAuthoringApi.unLockDocument(!!isAfterAskSave, this.canUnlockDocument2, null, bCollaborative);
@@ -3545,6 +3553,8 @@ var editor;
 
 	spreadsheet_api.prototype._onSaveCallbackInner = function () {
 		var t = this;
+		var isCellAutosave = this._cellEditorSaveInProgress;
+		this._cellEditorCheckpoint = false;
 
 		AscCommon.CollaborativeEditing.Clear_CollaborativeMarks();
 		// Accept others' changes
@@ -3567,6 +3577,10 @@ var editor;
 			t.canSave = true;
 			t.IsUserSave = false;
 			t.lastSaveTime = null;
+			t._cellEditorSaveInProgress = false;
+			if (t.asc_getCellEditMode()) {
+				t.wb.cellEditor._scheduleAutosave();
+			}
 
 			if (!t.forceSaveButtonContinue) {
 				t.sync_EndAction(c_oAscAsyncActionType.Information, c_oAscAsyncAction.Save);
@@ -3591,7 +3605,7 @@ var editor;
 		}
 		else
 		{
-			this.collaborativeEditing.sendChanges(this.IsUserSave, true);
+			this.collaborativeEditing.sendChanges(this.IsUserSave, true, undefined, isCellAutosave);
 		}
 	};
 
@@ -6784,18 +6798,20 @@ var editor;
   ////////////////////////////AutoSave api/////////////////////////////////
   /////////////////////////////////////////////////////////////////////////
 	spreadsheet_api.prototype._autoSaveInner = function () {
-		if (this.asc_getCellEditMode() || this.asc_getIsTrackShape()) {
+		var isCellAutosave = this.asc_getCellEditMode();
+		if (this.asc_getIsTrackShape()) {
 		  return;
         }
 
-		if (this.CollaborativeEditing.Is_Fast() && !this.CollaborativeEditing.Is_SingleUser()) {
+		if (!isCellAutosave && this.CollaborativeEditing.Is_Fast() && !this.CollaborativeEditing.Is_SingleUser()) {
 			this.wb.Continue_FastCollaborativeEditing();
 		} else if (this.isLiveViewer()) {
 			if (this.isDocumentLoadComplete && this.collaborativeEditing.haveOtherChanges()) {
 				this.collaborativeEditing.applyChanges();
 			}
 			return;
-		} else if (!History.Have_Changes(true) && !(this.collaborativeEditing.getCollaborativeEditing() &&
+		}
+		if (!isCellAutosave && !History.Have_Changes(true) && !(this.collaborativeEditing.getCollaborativeEditing() &&
 			0 !== this.collaborativeEditing.getOwnLocksLength())) {
 			if (this.collaborativeEditing.getFast() && this.collaborativeEditing.haveOtherChanges()) {
 				AscCommon.CollaborativeEditing.Clear_CollaborativeMarks();
@@ -6810,6 +6826,11 @@ var editor;
             if (AscCommon.CollaborativeEditing.Is_Fast() /*&& !AscCommon.CollaborativeEditing.Is_SingleUser()*/) {
                 this.wb.sendCursor();
             }
+			return;
+		}
+		// The editor's debounce creates checkpoints; later ticks must still send pending ones.
+		if (isCellAutosave && (!this._cellEditorCheckpoint || this.wb.cellEditor._editLockPending ||
+			this.collaborativeEditing.getGlobalLock())) {
 			return;
 		}
 		if (null === this.lastSaveTime) {
@@ -6840,7 +6861,7 @@ var editor;
 	spreadsheet_api.prototype._onUpdateDocumentCanSave = function () {
 		// Can optimize this condition to be faster (change the state ourselves in arguments instead of requesting each time)
 		var tmp = History.Have_Changes() || (this.collaborativeEditing.getCollaborativeEditing() &&
-			0 !== this.collaborativeEditing.getOwnLocksLength()) || this.asc_getCellEditMode();
+			0 !== this.collaborativeEditing.getOwnLocksLength()) || this._hasUncommittedCellChanges();
 		if (tmp !== this.isDocumentCanSave) {
 			this.isDocumentCanSave = tmp;
 			this.handlers.trigger('asc_onDocumentCanSaveChanged', this.isDocumentCanSave);
@@ -6864,6 +6885,7 @@ var editor;
   spreadsheet_api.prototype.SetDocumentModified = spreadsheet_api.prototype.onUpdateDocumentModified = function(bIsModified) {
     // Update only after saving is complete
     if (this.canSave) {
+      bIsModified = bIsModified || this._hasUncommittedCellChanges();
       this.handlers.trigger("asc_onDocumentModifiedChanged", bIsModified);
       this._onUpdateDocumentCanSave();
 

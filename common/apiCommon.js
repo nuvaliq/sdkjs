@@ -6348,6 +6348,7 @@ function (window, undefined) {
 		this.Format = null;
 		this.VKey = null;
 		this.Token = null;
+		this.TokenType = "open";
 		this.UserInfo = null;
 		this.Options = null;
 		this.CallbackUrl = null;
@@ -6381,6 +6382,7 @@ function (window, undefined) {
 		res.Format = this.Format;
 		res.VKey = this.VKey;
 		res.Token = this.Token;
+		res.TokenType = this.TokenType;
 		res.UserInfo = this.UserInfo ? this.UserInfo.clone() : null;
 		res.Options = this.Options ? JSON.parse(JSON.stringify(this.Options)) : null;
 		res.CallbackUrl = this.CallbackUrl;
@@ -6482,6 +6484,14 @@ function (window, undefined) {
 	};
 	prot.put_Token = prot.asc_putToken = function (v) {
 		this.Token = v;
+	};
+	prot.get_TokenType = prot.asc_getTokenType = function () {
+		return this.TokenType;
+	};
+	prot.put_TokenType = prot.asc_putTokenType = function (v) {
+		if (v !== "open" && v !== "session")
+			throw new TypeError("Invalid authentication token type");
+		this.TokenType = v;
 	};
 	prot.get_OfflineApp = function () {
 		return this.OfflineApp;
@@ -9430,6 +9440,8 @@ function (window, undefined) {
 	prot["put_UserInfo"] = prot["asc_putUserInfo"] = prot.asc_putUserInfo;
 	prot["get_Token"] = prot["asc_getToken"] = prot.asc_getToken;
 	prot["put_Token"] = prot["asc_putToken"] = prot.asc_putToken;
+	prot["get_TokenType"] = prot["asc_getTokenType"] = prot.asc_getTokenType;
+	prot["put_TokenType"] = prot["asc_putTokenType"] = prot.asc_putTokenType;
 	prot["get_Mode"] = prot["asc_getMode"] = prot.asc_getMode;
 	prot["put_Mode"] = prot["asc_putMode"] = prot.asc_putMode;
 	prot["get_Permissions"] = prot["asc_getPermissions"] = prot.asc_getPermissions;

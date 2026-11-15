@@ -138,6 +138,8 @@ function (window, undefined) {
 		this.skipKeyPress = undefined;
 		this.undoList = [];
 		this.redoList = [];
+		// the last undo entry of typed text that the next typed char can extend
+		this.undoTypingGroup = null;
 		this.undoMode = false;
 		this.noUpdateMode = false;
 		this.selectionBegin = -1;
@@ -383,6 +385,7 @@ function (window, undefined) {
 	CellEditor.prototype.close = function (saveValue, callback) {
 		var opt = this.options;
 		var t = this;
+		this._clearAutosaveTimer();
 
 		let externalSelectionController = this.handlers.trigger("getExternalSelectionController");
 		if (externalSelectionController && externalSelectionController.getExternalFormulaEditMode()) {
@@ -968,10 +971,99 @@ function (window, undefined) {
 
 		this.undoList = [];
 		this.redoList = [];
+		this.undoTypingGroup = null;
 		this.undoMode = false;
 		this._setSkipKeyPress(false);
+		this._lastAutosavedText = AscCommonExcel.getFragmentsText(opt.fragments);
+		this._lastAutosavedFragments = this._getFragmentsSnapshot();
+		this._autosaveInProgress = false;
+		this._autosaveSession = (this._autosaveSession || 0) + 1;
 
 		this.updateWizardMode(false);
+	};
+
+	CellEditor.prototype._getFragmentsSnapshot = function () {
+		return this.options.fragments.map(function (fragment) {
+			return {text: fragment.getFragmentText(), format: fragment.format.clone()};
+		});
+	};
+
+	CellEditor.prototype.hasUnsavedChanges = function () {
+		if (!this.isOpened) {
+			return false;
+		}
+		var saved = this._lastAutosavedFragments;
+		var fragments = this.options.fragments;
+		if (this._autosaveInProgress || !saved || fragments.length !== saved.length) {
+			return true;
+		}
+		for (var i = 0; i < fragments.length; ++i) {
+			if (fragments[i].getFragmentText() !== saved[i].text || !fragments[i].format.isEqual(saved[i].format)) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	CellEditor.prototype._clearAutosaveTimer = function () {
+		if (this._autosaveTimer) {
+			window.clearTimeout(this._autosaveTimer);
+			this._autosaveTimer = null;
+		}
+	};
+
+	CellEditor.prototype._canAutosave = function () {
+		var text = AscCommonExcel.getFragmentsText(this.options.fragments);
+		var firstChar = text.charAt(0);
+		var api = window["Asc"]["editor"];
+		return this.isOpened && api.canSave && !this._editLockPending &&
+			!api.collaborativeEditing.getGlobalLock() && !this.handlers.trigger('getWizard') &&
+			c_oAscCellEditorSelectState.range !== this.isSelectMode && -1 === this.beginCompositePos &&
+			'=' !== firstChar && '+' !== firstChar && '-' !== firstChar &&
+			!window['IS_NATIVE_EDITOR'] && !window["Asc"]["editor"].isMobileVersion;
+	};
+
+	CellEditor.prototype._scheduleAutosave = function () {
+		this._clearAutosaveTimer();
+		if (!this._canAutosave()) {
+			return;
+		}
+		var t = this;
+		this._autosaveTimer = window.setTimeout(function () {
+			t._autosaveTimer = null;
+			t.autosaveValue();
+		}, 5000);
+	};
+
+	CellEditor.prototype.autosaveValue = function () {
+		if (!this._canAutosave() || this._autosaveInProgress) {
+			return false;
+		}
+		this._clearAutosaveTimer();
+		var text = AscCommonExcel.getFragmentsText(this.options.fragments);
+		if (text === this._lastAutosavedText) {
+			return false;
+		}
+
+		var t = this;
+		var fragments = this.options.fragments.map(function (fragment) {
+			return fragment.clone();
+		});
+		var session = this._autosaveSession;
+		var snapshot = this._getFragmentsSnapshot();
+		this._autosaveInProgress = true;
+		this.options.saveValueCallback(fragments, this.textFlags.clone(), function (success) {
+			t._autosaveInProgress = false;
+			if (session === t._autosaveSession && success && t.isOpened) {
+				t._lastAutosavedText = text;
+				t._lastAutosavedFragments = snapshot;
+				window["Asc"]["editor"]._cellEditorCheckpoint = true;
+				if (text !== AscCommonExcel.getFragmentsText(t.options.fragments)) {
+					t._scheduleAutosave();
+				}
+			}
+		}, true);
+		return true;
 	};
 
 	CellEditor.prototype._parseRangeStr = function (s) {
@@ -1310,6 +1402,7 @@ function (window, undefined) {
 		if (window['IS_NATIVE_EDITOR']) {
 			window['native']['onCellEditorChangeText'](AscCommonExcel.getFragmentsText(this.options.fragments));
 		}
+		this._scheduleAutosave();
 	};
 
 	CellEditor.prototype._fireUpdated = function () {
@@ -1930,6 +2023,7 @@ function (window, undefined) {
 
 	CellEditor.prototype._moveCursor = function (kind, pos, lineIndex) {
 		this.newTextFormat = null;
+		this.undoTypingGroup = null;
 		var t = this;
 		this.sAutoComplete = null;
 
@@ -2131,7 +2225,30 @@ function (window, undefined) {
 	CellEditor.prototype._addCharCodes = function (arrCharCodes) {
 		return this._addChars(arrCharCodes);
 	};
-	CellEditor.prototype._addChars = function (str, pos, isRange) {
+	/**
+	 * Returns the undo entry of the typing group that the typed chars continue, or null when they start a new group.
+	 * The group continues while the chars are typed right after it; the spaces join the previous word,
+	 * so the first char after them starts a new group. A pause over one second also starts a new group.
+	 * @param {number} pos
+	 * @param {number[]} charCodes
+	 * @returns {?Object}
+	 */
+	CellEditor.prototype._getUndoTypingGroup = function (pos, charCodes) {
+		var group = this.undoTypingGroup;
+		if (!group || Date.now() - group.time > 1000 || this.newTextFormat || group.entry !== this.undoList[this.undoList.length - 1]) {
+			return null;
+		}
+		var entry = group.entry;
+		if (entry.args[0] + entry.args[1] !== pos) {
+			return null;
+		}
+		if (group.isSpaceEnd && !AscCommon.IsSpace(charCodes[0])) {
+			return null;
+		}
+		return entry;
+	};
+
+	CellEditor.prototype._addChars = function (str, pos, isRange, isTyping) {
 		if (!isRange) {
 			this.cleanSelectRange();
 		}
@@ -2142,6 +2259,7 @@ function (window, undefined) {
 		var noUpdateMode = this.noUpdateMode;
 		this.noUpdateMode = true;
 
+		var suggestionGroup = isTyping && this.sAutoComplete && this.undoTypingGroup;
 		this.sAutoComplete = null;
 
 		if (!opt.fragments) {
@@ -2149,12 +2267,21 @@ function (window, undefined) {
 		}
 
 		if (this.selectionBegin !== this.selectionEnd) {
-			var copyFragment = this._findFragmentToInsertInto(Math.min(this.selectionBegin, this.selectionEnd) + 1);
-			if (copyFragment && !this.newTextFormat) {
-				this.newTextFormat = opt.fragments[copyFragment.index].format.clone();
-			}
+			if (suggestionGroup && suggestionGroup.entry === this.undoList[this.undoList.length - 1]) {
+				var suggestionLength = Math.abs(this.selectionEnd - this.selectionBegin);
+				this.undoMode = true;
+				this._removeChars(undefined, undefined, isRange);
+				this.undoMode = false;
+				suggestionGroup.entry.args[1] -= suggestionLength;
+				this.undoTypingGroup = suggestionGroup;
+			} else {
+				var copyFragment = this._findFragmentToInsertInto(Math.min(this.selectionBegin, this.selectionEnd) + 1);
+				if (copyFragment && !this.newTextFormat) {
+					this.newTextFormat = opt.fragments[copyFragment.index].format.clone();
+				}
 
-			this._removeChars(undefined, undefined, isRange);
+				this._removeChars(undefined, undefined, isRange);
+			}
 		}
 
 		if (str.trim) {
@@ -2178,8 +2305,15 @@ function (window, undefined) {
 			}
 
 			if (!this.undoMode) {
-				// save info to undo/redo
-				this.undoList.push({fn: this._removeChars, args: [pos, length], isRange: isRange});
+				// save info to undo/redo, the typed chars extend the current typing group
+				var undoEntry = isTyping ? this._getUndoTypingGroup(pos, str) : null;
+				if (undoEntry) {
+					undoEntry.args[1] += length;
+				} else {
+					undoEntry = {fn: this._removeChars, args: [pos, length], isRange: isRange};
+					this.undoList.push(undoEntry);
+				}
+				this.undoTypingGroup = isTyping ? {entry: undoEntry, isSpaceEnd: AscCommon.IsSpace(str[length - 1]), time: Date.now()} : null;
 				this.redoList = [];
 			}
 
@@ -2222,6 +2356,7 @@ function (window, undefined) {
 	};
 
 	CellEditor.prototype._removeChars = function (pos, length, isRange) {
+		this.undoTypingGroup = null;
 		var t = this, opt = t.options, b, e, l, first, last;
 
 		if (!isRange) {
@@ -2592,6 +2727,7 @@ function (window, undefined) {
 	};
 
 	CellEditor.prototype._performAction = function (list1, list2) {
+		this.undoTypingGroup = null;
 		var t = this, action, str, pos, len;
 
 		if (list1.length < 1) {
@@ -2630,7 +2766,9 @@ function (window, undefined) {
 		} else if (action.fn === t._replaceFragments) {
 			pos = action.args[1];
 			len = action.args[2];
-			list2.push({fn: t._replaceFragments, args: [t._getFragments(pos, len), pos, len]});
+			list2.push({fn: t._replaceFragments,
+				args: [len ? t._getFragments(pos, len) : t.options.fragments.map(function (fragment) { return fragment.clone(); }),
+					pos, AscCommonExcel.getFragmentsLength(action.args[0])]});
 		} else {
 			return;
 		}
@@ -3099,11 +3237,11 @@ function (window, undefined) {
 		if (Array.isArray(codePoints)) {
 			for (let nIdx = 0; nIdx < codePoints.length; ++nIdx) {
 				newChar = String.fromCharCode(codePoints[nIdx]);
-				t._addChars(newChar);
+				t._addChars(newChar, undefined, undefined, /*isTyping*/true);
 			}
 		} else {
 			newChar = String.fromCharCode(codePoints);
-			t._addChars(newChar);
+			t._addChars(newChar, undefined, undefined, /*isTyping*/true);
 		}
 
 		//TODO in case of adding an array - check - perhaps the part needs to be called every time after _addChars
@@ -3129,9 +3267,16 @@ function (window, undefined) {
 				if (1 === arrAutoComplete.length) {
 					var newValue = arrAutoComplete[0];
 					tmpCursorPos = t.cursorPos;
-					t._addChars(newValue.substring(lengthInput));
+					var typingGroup = t.undoTypingGroup;
+					t.undoMode = true;
+					var added = t._addChars(newValue.substring(lengthInput));
+					t.undoMode = false;
 					t.selectionBegin = tmpCursorPos;
 					t._selectChars(kEndOfText);
+					if (typingGroup) {
+						typingGroup.entry.args[1] += added;
+						t.undoTypingGroup = typingGroup;
+					}
 					this.sAutoComplete = newValue;
 				}
 			}
@@ -3288,8 +3433,29 @@ function (window, undefined) {
 		AscFonts.FontPickerByCharacter.checkText(checkedText, this, function () {
 			t.loadFonts = false;
 			t.skipTLUpdate = true;
-			var length = t.replaceText(0, t.textRender.getEndOfText(), t.input.value);
+			var inputEvent = event.originalEvent || event;
+			var oldText = AscCommonExcel.getFragmentsCharCodes(t.options.fragments);
+			var newText = AscCommon.convertUTF16toUnicode(t.input.value);
+			var pos = t.cursorPos;
+			var added = newText.length - oldText.length;
+			var isInsertion = inputEvent.inputType === "insertText" && added > 0 &&
+				t.selectionBegin === t.selectionEnd &&
+				oldText.slice(0, pos).join(',') === newText.slice(0, pos).join(',') &&
+				oldText.slice(pos).join(',') === newText.slice(pos + added).join(',');
+			if (isInsertion) {
+				for (var i = pos; i < pos + added; ++i) {
+					t._addChars([newText[i]], undefined, undefined, true);
+				}
+			} else {
+				t.replaceText(0, t.textRender.getEndOfText(), t.input.value);
+			}
+			var length = AscCommonExcel.getFragmentsText(t.options.fragments).length;
+			// Matching the DOM cursor must not close a group after every input event.
+			var typingGroup = t.undoTypingGroup;
 			t._updateCursorByTopLine();
+			if (isInsertion) {
+				t.undoTypingGroup = typingGroup;
+			}
 
 			if (length !== t.input.value.length) {
 				t.input.value = AscCommonExcel.getFragmentsText((t.options.fragments));
@@ -3330,6 +3496,13 @@ function (window, undefined) {
 		return newText;
 	};
 	CellEditor.prototype.Begin_CompositeInput = function () {
+		this.undoTypingGroup = null;
+		this.compositeUndoState = {
+			index: this.undoList.length,
+			redoList: this.redoList.slice(),
+			newTextFormat: this.newTextFormat && this.newTextFormat.clone(),
+			fragments: this.options.fragments.map(function (fragment) { return fragment.clone(); })
+		};
 		if (this.selectionBegin === this.selectionEnd) {
 			this.beginCompositePos = this.cursorPos;
 			this.compositeLength = 0;
@@ -3371,6 +3544,23 @@ function (window, undefined) {
 		}
 		this.setTextStyle('u', Asc.EUnderline.underlineNone);
 
+		if (this.compositeUndoState) {
+			this.undoList.splice(this.compositeUndoState.index);
+			if (AscCommonExcel.getFragmentsText(this.compositeUndoState.fragments) ===
+				AscCommonExcel.getFragmentsText(this.options.fragments)) {
+				// Cancelled composition must preserve the history and the original formatting.
+				this.options.fragments = this.compositeUndoState.fragments;
+				this.newTextFormat = this.compositeUndoState.newTextFormat;
+				this.redoList = this.compositeUndoState.redoList;
+				this._update();
+			} else {
+				this.undoList.push({fn: this._replaceFragments,
+					args: [this.compositeUndoState.fragments, 0, this.textRender.getEndOfText()]});
+				this.redoList = [];
+			}
+			this.compositeUndoState = null;
+			this.undoTypingGroup = null;
+		}
 		this.beginCompositePos = -1;
 		this.compositeLength = 0;
 		this.selectionBegin = tmpBegin;

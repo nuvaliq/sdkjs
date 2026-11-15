@@ -771,8 +771,7 @@ CHistory.prototype =
 			// Композитный ввод не разрешаем объединять ни с чем, кроме композитного ввода
 			return false;
 		}
-		else if ((AscDFH.historydescription_Document_AddLetter === Point1.Description || AscDFH.historydescription_Document_AddLetterUnion === Point1.Description)
-			&& (AscDFH.historydescription_Document_AddLetter === Point2.Description || AscDFH.historydescription_Document_AddLetterUnion === Point2.Description))
+		else if (this.private_IsTypingPoint(Point1) && this.private_IsTypingPoint(Point2))
 		{
             var PrevItem = null;
             var Class    = null;
@@ -1541,6 +1540,16 @@ CHistory.prototype.private_PostProcessingRecalcData = function()
 		}
 
 		return false;
+	};
+	/**
+	 * A typing point that can be merged with its neighbours (a letter or a space typed on the keyboard)
+	 * @returns {boolean}
+	 */
+	CHistory.prototype.private_IsTypingPoint = function(point)
+	{
+		return (AscDFH.historydescription_Document_AddLetter === point.Description
+			|| AscDFH.historydescription_Document_AddLetterUnion === point.Description
+			|| AscDFH.historydescription_Document_SpaceButton === point.Description);
 	};
 	CHistory.prototype.private_IsPointDoAutoCorrect = function(nPointIndex)
 	{

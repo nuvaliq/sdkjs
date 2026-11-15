@@ -297,7 +297,7 @@
 			return true;
 		};
 
-		CCollaborativeEditing.prototype.sendChanges = function (IsUserSave, isAfterAskSave, changesToSend) {
+		CCollaborativeEditing.prototype.sendChanges = function (IsUserSave, isAfterAskSave, changesToSend, isCellAutosave) {
 			// When not collaborative editing, nothing needs to be cleared, but sending is required.
 			var bIsCollaborative = this.getCollaborativeEditing();
 
@@ -310,7 +310,7 @@
 				}
 
 				// Clear our changes
-				while (0 < this.m_arrNeedUnlock2.length) {
+				while (!isCellAutosave && 0 < this.m_arrNeedUnlock2.length) {
 					oLock = this.m_arrNeedUnlock2.shift();
 					oLock.setType(c_oAscLockTypes.kLockTypeNone, false);
 
@@ -365,7 +365,7 @@
 			}
 
 			// Send changes to server
-			this.handlers.trigger("sendChanges", this.getRecalcIndexSave(this.m_oRecalcIndexColumns), this.getRecalcIndexSave(this.m_oRecalcIndexRows), isAfterAskSave, changesToSend);
+			this.handlers.trigger("sendChanges", this.getRecalcIndexSave(this.m_oRecalcIndexColumns), this.getRecalcIndexSave(this.m_oRecalcIndexRows), isAfterAskSave, changesToSend, isCellAutosave);
 
 			if (bIsCollaborative) {
 				// Recalculate locks from other users

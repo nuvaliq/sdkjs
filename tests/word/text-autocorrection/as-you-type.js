@@ -116,4 +116,54 @@ $(function ()
 		enterAndCheckTextToCell(assert, "Hello world! hello", "Hello world! hello");
 		enterAndCheckTextToCell(assert, "Hello world! hello world", "Hello world! hello world");
 	});
+
+	QUnit.test("Test: undo/redo of words typed around an 'as you type' autocorrection", function (assert)
+	{
+		function typeText(text, isSpaceByKey)
+		{
+			for (let char of text)
+			{
+				if (" " === char && isSpaceByKey)
+					AscTest.PressKey(AscTest.Key.space);
+				else
+					AscTest.EnterText(char);
+			}
+		}
+
+		function check(isSpaceByKey)
+		{
+			let suffix = isSpaceByKey ? " (space by key)" : " (space by text input)";
+
+			AscTest.ClearDocument();
+			p = AscTest.CreateParagraph();
+			logicDocument.AddToContent(0, p);
+			AscTest.AddTextToParagraph(p, "Start. ");
+			AscTest.MoveCursorToParagraph(p, false);
+			AscCommon.History.Clear();
+
+			typeText("привет мир дом", isSpaceByKey);
+			assert.strictEqual(AscTest.GetParagraphText(p), "Start. Привет мир дом", "Type text with autocorrection" + suffix);
+
+			logicDocument.Document_Undo();
+			assert.strictEqual(AscTest.GetParagraphText(p), "Start. Привет мир", "Undo removes ' дом' at once" + suffix);
+			logicDocument.Document_Undo();
+			assert.strictEqual(AscTest.GetParagraphText(p), "Start. Привет ", "Undo removes 'мир' typed after the autocorrection" + suffix);
+			logicDocument.Document_Undo();
+			assert.strictEqual(AscTest.GetParagraphText(p), "Start. привет ", "Undo reverts the autocorrection separately" + suffix);
+			logicDocument.Document_Undo();
+			assert.strictEqual(AscTest.GetParagraphText(p), "Start. привет", "Undo removes the space that triggered the autocorrection" + suffix);
+
+			logicDocument.Document_Redo();
+			assert.strictEqual(AscTest.GetParagraphText(p), "Start. привет ", "Redo returns the space" + suffix);
+			logicDocument.Document_Redo();
+			assert.strictEqual(AscTest.GetParagraphText(p), "Start. Привет ", "Redo returns the autocorrection separately" + suffix);
+			logicDocument.Document_Redo();
+			logicDocument.Document_Redo();
+			assert.strictEqual(AscTest.GetParagraphText(p), "Start. Привет мир дом", "Redo returns 'мир' and ' дом'" + suffix);
+		}
+
+		logicDocument.SetAutoCorrectFirstLetterOfSentences(true);
+		check(false);
+		check(true);
+	});
 });

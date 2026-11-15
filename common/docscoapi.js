@@ -345,6 +345,13 @@
     return null;
   };
 
+  CDocsCoApi.prototype.getAuthToken = function() {
+    if (this._CoAuthoringApi && this._onlineWork) {
+      return this._CoAuthoringApi.getAuthToken();
+    }
+    return {type: "open", token: null};
+  };
+
   CDocsCoApi.prototype.releaseLocks = function(blockId) {
     if (this._CoAuthoringApi && this._onlineWork) {
       this._CoAuthoringApi.releaseLocks(blockId);
@@ -696,6 +703,10 @@
     return this.jwtSession || this.jwtOpen;
   };
 
+  DocsCoApi.prototype.getAuthToken = function() {
+    return this.jwtSession ? {type: "session", token: this.jwtSession} : {type: "open", token: this.jwtOpen || null};
+  };
+
   DocsCoApi.prototype.getSessionId = function() {
     return this._id;
   };
@@ -864,7 +875,7 @@
       curBytes += arrayChanges[endIndex].length;
     }
     this.currentIndexEnd = endIndex;
-    if (endIndex === arrayChanges.length) {
+    if (endIndex === arrayChanges.length && this.canReleaseLocks) {
       for (var key in this._locks) if (this._locks.hasOwnProperty(key)) {
         if (2 === this._locks[key].state /*lock is ours*/) {
           delete this._locks[key];
@@ -1057,6 +1068,21 @@
     }
   };
 
+  DocsCoApi.prototype._syncAuthTokens = function() {
+    var auth = this.socketio && this.socketio["auth"];
+    if (!auth) return;
+    if (this.jwtOpen !== undefined && this.jwtOpen !== null) auth["token"] = this.jwtOpen;
+    else delete auth["token"];
+    if (this.jwtSession) auth["session"] = this.jwtSession;
+    else delete auth["session"];
+    var data = auth["data"];
+    if (!data) return;
+    if (this.jwtOpen !== undefined && this.jwtOpen !== null) data["jwtOpen"] = this.jwtOpen;
+    else delete data["jwtOpen"];
+    if (this.jwtSession) data["jwtSession"] = this.jwtSession;
+    else delete data["jwtSession"];
+  };
+
   DocsCoApi.prototype._onRefreshToken = function(jwt) {
     this.jwtOpen = undefined;
     if (this.socketio) {
@@ -1078,6 +1104,7 @@
         }
       }
     }
+    this._syncAuthTokens();
   };
 
 	DocsCoApi.prototype._onForceSaveStart = function(data) {
@@ -1640,6 +1667,11 @@
   };
 
   DocsCoApi.prototype.init = function(user, docid, documentCallbackUrl, token, editorType, documentFormatSave, docInfo, shardKey, wopiSrc, userSessionId, headingsColor, openCmd) {
+    var tokenType = docInfo.get_TokenType ? docInfo.get_TokenType() : "open";
+    var authToken = docInfo.get_Token();
+    if ((tokenType !== "open" && tokenType !== "session") || (tokenType === "session" && !authToken)) {
+      throw new TypeError("Invalid authentication token type or value");
+    }
     this._user = user;
     this._docid = null;
     this._documentCallbackUrl = documentCallbackUrl;
@@ -1656,7 +1688,8 @@
 	this.permissions = docInfo.get_Permissions();
 	this.lang = docInfo.get_Lang();
     this.openCmd = openCmd;
-	this.jwtOpen = docInfo.get_Token();
+	this.jwtOpen = tokenType === "open" ? authToken : undefined;
+    this.jwtSession = tokenType === "session" ? authToken : undefined;
     this.encrypted = docInfo.get_Encrypted() || docInfo.get_IsWebOpening();
     this.IsAnonymousUser = docInfo.get_IsAnonymousUser();
     this.coEditingMode = docInfo.asc_getCoEditingMode();

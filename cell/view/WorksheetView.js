@@ -19650,7 +19650,7 @@ function isAllowPasteLink(pastedWb) {
 			autoCompleteLC: arrAutoCompleteLC,
 			bbox: c.bbox,
 			cellNumFormat: c.getNumFormatType(),
-			saveValueCallback: function (val, flags, callback) {
+			saveValueCallback: function (val, flags, callback, isIntermediate) {
 				var saveCellValueCallback = function (success) {
 					if (!success) {
 						if (callback) {
@@ -19715,6 +19715,9 @@ function isAllowPasteLink(pastedWb) {
 
 					if (setValueError) {
 						// Error sent from another function
+						if (isIntermediate) {
+							callback(false);
+						}
 						return false;
 					}
 
@@ -19744,10 +19747,15 @@ function isAllowPasteLink(pastedWb) {
 
 					temporarySetValue(checkCell.getValueData());
 					if (!dataValidation.checkValue(checkCell, t.model)) {
-						t.model.workbook.handlers.trigger("asc_onError", c_oAscError.ID.DataValidate,
-							c_oAscError.Level.NoCritical, dataValidation);
-						editor.setFocus(true);
+						if (!isIntermediate) {
+							t.model.workbook.handlers.trigger("asc_onError", c_oAscError.ID.DataValidate,
+								c_oAscError.Level.NoCritical, dataValidation);
+							editor.setFocus(true);
+						}
 						temporarySetValue();
+						if (isIntermediate) {
+							callback(false);
+						}
 						return false;
 					} else {
 						temporarySetValue();
@@ -19809,6 +19817,10 @@ function isAllowPasteLink(pastedWb) {
 						if (isDynamicRef && AscCommonExcel.bIsSupportDynamicArrays) {
 							return saveCellValueCallback(true);
 						} else {
+							if (isIntermediate) {
+								callback(false);
+								return false;
+							}
 							t.handlers.trigger("onErrorEvent", c_oAscError.ID.CannotChangeFormulaArray,
 							c_oAscError.Level.NoCritical);
 							return false;

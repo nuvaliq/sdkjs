@@ -334,4 +334,70 @@ $(function () {
 		assert.strictEqual(GetParagraphText(p), "");
 		assert.strictEqual(GetParagraphText(pInShape), _textInShape);
 	});
+	QUnit.test("Undo/Redo groups a typed word with the space before it", function (assert)
+	{
+		// Each character comes as a separate action, the space either through EnterText (text input)
+		// or through the Space key (keydown)
+		function typeText(text, isSpaceByKey)
+		{
+			for (let char of text)
+			{
+				if (" " === char && isSpaceByKey)
+					AscTest.PressKey(AscTest.Key.space);
+				else
+					AscTest.EnterText(char);
+			}
+		}
+		function startParagraph()
+		{
+			AscTest.ClearDocument();
+			let p = AscTest.CreateParagraph();
+			logicDocument.AddToContent(0, p);
+			AscTest.AddTextToParagraph(p, "Start");
+			AscTest.MoveCursorToParagraph(p, false);
+			AscCommon.History.Clear();
+			return p;
+		}
+		function undo()
+		{
+			logicDocument.Document_Undo();
+		}
+		function redo()
+		{
+			logicDocument.Document_Redo();
+		}
+		function check(isSpaceByKey)
+		{
+			let suffix = isSpaceByKey ? " (space by key)" : " (space by text input)";
+
+			let p = startParagraph();
+			typeText(" Привет мир", isSpaceByKey);
+			assert.strictEqual(GetParagraphText(p), "Start Привет мир", "Type ' Привет мир'" + suffix);
+			undo();
+			assert.strictEqual(GetParagraphText(p), "Start Привет", "Undo removes ' мир' at once" + suffix);
+			undo();
+			assert.strictEqual(GetParagraphText(p), "Start", "Undo removes ' Привет' at once" + suffix);
+			redo();
+			assert.strictEqual(GetParagraphText(p), "Start Привет", "Redo returns ' Привет' at once" + suffix);
+			redo();
+			assert.strictEqual(GetParagraphText(p), "Start Привет мир", "Redo returns ' мир' at once" + suffix);
+
+			p = startParagraph();
+			typeText(" Привет ", isSpaceByKey);
+			undo();
+			assert.strictEqual(GetParagraphText(p), "Start Привет", "Undo removes only the trailing space" + suffix);
+			undo();
+			assert.strictEqual(GetParagraphText(p), "Start", "Undo removes ' Привет' at once" + suffix);
+
+			p = startParagraph();
+			typeText(" a  b", isSpaceByKey);
+			undo();
+			assert.strictEqual(GetParagraphText(p), "Start a", "Undo removes '  b' with both spaces at once" + suffix);
+			undo();
+			assert.strictEqual(GetParagraphText(p), "Start", "Undo removes ' a' at once" + suffix);
+		}
+
+		check(false);
+		check(true);
+	});
 });
