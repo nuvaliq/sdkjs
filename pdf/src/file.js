@@ -158,6 +158,7 @@
 
     CFile.prototype.getPage = function(pageIndex, width, height, isNoUseCacheManager, backgroundColor)
     {
+        this.pageRenderFailed = false;
         if (!this.nativeFile)
             return null;
         if (pageIndex < 0 || pageIndex >= this.pages.length || this.pages[pageIndex].originIndex == undefined)
@@ -185,7 +186,11 @@
         var t0 = performance.now();
         var pixels = this.nativeFile["getPagePixmap"](pageIndex, width, height, backgroundColor);
         if (!pixels)
+        {
+            this.pageRenderFailed = !!(this.nativeFile["hasDrawingFailure"] &&
+                this.nativeFile["hasDrawingFailure"]("getPagePixmap", pageIndex, width, height));
             return null;
+        }
 
         var image = null;
         if (!this.logging)
@@ -210,6 +215,30 @@
     };
     CFile.prototype.removePage = function(pageIndex) {
         return this.nativeFile["removePage"](pageIndex);
+    };
+    CFile.prototype.renderAppearances = function(draw) {
+        var previousFailure = this.appearanceRenderFailed;
+        this.appearanceRenderFailed = false;
+        try {
+            draw();
+            return !this.appearanceRenderFailed;
+        }
+        finally {
+            this.appearanceRenderFailed = previousFailure;
+        }
+    };
+    CFile.prototype.getAppearanceInfo = function(method, page, width, height, objectId) {
+        var info = objectId === undefined ? this.nativeFile[method](page, width, height) :
+            this.nativeFile[method](page, width, height, undefined, objectId);
+        if (this.nativeFile["hasTransientDrawingFailure"] && this.nativeFile["hasTransientDrawingFailure"]())
+            return null;
+
+        return { info: info, size: { w: width, h: height } };
+    };
+    CFile.prototype.recordAppearanceFailure = function(method, originIndex, width, height, appearanceIndex) {
+        if (this.appearanceRenderFailed === false && this.nativeFile && this.nativeFile["hasDrawingFailure"]) {
+            this.appearanceRenderFailed = this.nativeFile["hasDrawingFailure"](method, originIndex, width, height, appearanceIndex);
+        }
     };
     CFile.prototype.getPageWidth = function(nPage) {
         return this.pages[nPage].W;
@@ -2053,10 +2082,237 @@ void main() {\n\
     window["AscViewer"]["baseUrl"] = (typeof document !== 'undefined' && document.currentScript) ? "" : "./../src/engine/";
     window["AscViewer"]["baseEngineUrl"] = "./../src/engine/";
 
+    // A crash inside the drawing engine (e.g. "memory access out of bounds" in drawingfile.wasm)
+    // must not abort opening or editing. Skip failed calls on subsequent repaints.
+    // A null icon result distinguishes a failed read from a button with no icon.
+    // scanPage is left out on purpose: an empty result there would erase the page content on edit.
+    function guardNativeDrawing(nativeFile, report, onFailure)
+    {
+        if (!nativeFile || nativeFile["isDrawingGuarded"])
+            return nativeFile;
+        nativeFile["isDrawingGuarded"] = true;
+
+        var maxPageTrapsPerMethod = 2;
+        var reportsCount = 0;
+        var emptyResults = {
+            "getPagePixmap": function() { return null; },
+            "getAnnotationsAP": function() { return []; },
+            "getInteractiveFormsAP": function() { return []; },
+            "getButtonIcons": function() { return null; },
+            "getGlyphs": function() { return []; }
+        };
+        var pageFailures = new Map();
+        // Report the last failed call to its caller without preventing another attempt.
+        var transientFailure = null;
+
+        // getPagePixmap takes the current page index, which shifts when pages are added or removed;
+        // the other methods take the origin index.
+        function getFailurePage(name, page)
+        {
+            if (name === "getPagePixmap")
+            {
+                var pages = nativeFile["pages"];
+                var pageInfo = pages ? pages[page] : null;
+                if (pageInfo && pageInfo["originIndex"] !== undefined)
+                    return pageInfo["originIndex"];
+            }
+            return page;
+        }
+
+        function hasDrawingFailure(calls, key)
+        {
+            return !!(calls && (calls.size >= maxPageTrapsPerMethod || calls.has(key)));
+        }
+
+        function getCallKey(width, height, objectId, appearance)
+        {
+            return [width, height, objectId, appearance].join(":");
+        }
+
+        nativeFile["hasTransientDrawingFailure"] = function()
+        {
+            return transientFailure !== null;
+        };
+
+        nativeFile["hasDrawingFailure"] = function(name, page, width, height, objectId)
+        {
+            var originIndex = getFailurePage(name, page);
+            var methods = pageFailures.get(originIndex);
+            var key = getCallKey(width, height, objectId);
+            return hasDrawingFailure(methods && methods.get(name), key) ||
+                !!(transientFailure && transientFailure.name === name && transientFailure.page === originIndex && transientFailure.key === key);
+        };
+
+        nativeFile["clearDrawingFailuresFrom"] = function(firstOriginIndex)
+        {
+            pageFailures.forEach(function(methods, originIndex) {
+                if (originIndex >= firstOriginIndex)
+                    pageFailures.delete(originIndex);
+            });
+        };
+
+        function isEngineCrash(e)
+        {
+            return typeof WebAssembly !== "undefined" && !!WebAssembly.RuntimeError && e instanceof WebAssembly.RuntimeError;
+        }
+
+        function wrap(name)
+        {
+            var original = nativeFile[name];
+            if (typeof original !== "function")
+                return;
+
+            nativeFile[name] = function(page, width, height)
+            {
+                transientFailure = null;
+                var originIndex = getFailurePage(name, page);
+                var objectId, appearance;
+                if (name === "getAnnotationsAP")
+                    objectId = arguments[4];
+                else if (name === "getButtonIcons") {
+                    objectId = arguments[5];
+                    appearance = arguments[6];
+                }
+                var methods = pageFailures.get(originIndex);
+                var calls = methods && methods.get(name);
+                var key = calls && getCallKey(width, height, objectId, appearance);
+                if (hasDrawingFailure(calls, key))
+                    return emptyResults[name]();
+
+                // Keep the JS caller in the trace even when Wasm contributes many frames.
+                var stackTraceLimit = Error["stackTraceLimit"];
+                var extendStack = typeof stackTraceLimit === "number" && stackTraceLimit < 50;
+                if (extendStack)
+                    Error["stackTraceLimit"] = 50;
+                try
+                {
+                    return original.apply(nativeFile, arguments);
+                }
+                catch (e)
+                {
+                    var engineCrash = isEngineCrash(e);
+                    key = key || getCallKey(width, height, objectId, appearance);
+                    if (engineCrash)
+                    {
+                        if (!methods)
+                        {
+                            methods = new Map();
+                            pageFailures.set(originIndex, methods);
+                        }
+                        if (!calls)
+                        {
+                            calls = new Set();
+                            methods.set(name, calls);
+                        }
+                        calls.add(key);
+                    }
+
+                    // The engine locks the fonts loader to the page and does not unlock it on a throw.
+                    try
+                    {
+                        nativeFile["unlockPageNumForFontsLoader"]();
+                    }
+                    catch (unlockError)
+                    {
+                    }
+                    if (reportsCount < 10)
+                    {
+                        reportsCount++;
+                        try
+                        {
+                            report({
+                                method: name,
+                                page: originIndex,
+                                width: width,
+                                height: height,
+                                objectId: objectId,
+                                appearance: appearance,
+                                error: String(e),
+                                engineCrash: engineCrash,
+                                stack: (e && e.stack) || ""
+                            });
+                        }
+                        catch (reportError)
+                        {
+                        }
+                    }
+                    if (onFailure)
+                    {
+                        try
+                        {
+                            onFailure(engineCrash && calls.size === maxPageTrapsPerMethod);
+                        }
+                        catch (warningError)
+                        {
+                        }
+                    }
+                    transientFailure = engineCrash ? null : { name: name, page: originIndex, key: key };
+                    return emptyResults[name]();
+                }
+                finally
+                {
+                    if (extendStack)
+                        Error["stackTraceLimit"] = stackTraceLimit;
+                }
+            };
+        }
+
+        for (var name in emptyResults)
+            wrap(name);
+
+        return nativeFile;
+    }
+
+    CFile.prototype.queueDrawingWarning = function(limitReached)
+    {
+        var level = limitReached ? 2 : 1;
+        if ((this.drawingWarningLevel || 0) >= level)
+            return;
+
+        this.drawingWarningLevel = level;
+        var api = window["Asc"] && window["Asc"]["editor"] ? window["Asc"]["editor"] : window["editor"];
+        if (api && api.DocumentRenderer && api.DocumentRenderer.file === this)
+            this.showDrawingWarning(api);
+    };
+
+    CFile.prototype.showDrawingWarning = function(api)
+    {
+        var level = this.drawingWarningLevel;
+        if (!level || level === this.drawingWarningShown || !api.isDocumentLoadComplete)
+            return;
+
+        this.drawingWarningShown = level;
+        var text = level === 2 ?
+            "The editor stopped trying to display some PDF content after repeated errors." :
+            "Some PDF content could not be displayed.";
+        var message = AscCommon.translateManager.getValue(text);
+        api.sendEvent("asc_onError", message, Asc.c_oAscError.Level.NoCritical);
+    };
+
+    function reportNativeDrawingFailure(failure)
+    {
+        var api = window["Asc"] && window["Asc"]["editor"] ? window["Asc"]["editor"] : window["editor"];
+        var editorInfo = api && api.getEditorErrorInfo ? api.getEditorErrorInfo() : null;
+        var memoryInfo = AscCommon.getMemoryInfo ? AscCommon.getMemoryInfo() : null;
+        var msg = "pdfDrawingError: method=" + failure.method + " page=" + failure.page +
+            " size=" + failure.width + "x" + failure.height + " engineCrash=" + failure.engineCrash +
+            (failure.objectId === undefined ? "" : " objectId=" + failure.objectId) +
+            (failure.appearance === undefined ? "" : " appearance=" + failure.appearance) +
+            " error=" + failure.error +
+            "\n userAgent: " + (navigator.userAgent || "") +
+            (editorInfo ? "\n " + editorInfo : "") +
+            (memoryInfo ? "\n performance.memory: " + memoryInfo : "") +
+            "\n StackTrace: " + failure.stack;
+        AscCommon.sendClientLog("error", msg, api);
+    }
+
     window["AscViewer"].createFile = function(data)
     {
         var file = new CFile();
         file.nativeFile = new window["AscViewer"]["CDrawingFile"]();
+        guardNativeDrawing(file.nativeFile, reportNativeDrawingFailure, function(limitReached) {
+            file.queueDrawingWarning(limitReached);
+        });
         var error = file.nativeFile["loadFromData"](data);
         if (0 === error)
         {

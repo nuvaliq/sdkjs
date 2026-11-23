@@ -259,6 +259,11 @@
 		let oThumbnails		= oDoc.Viewer.thumbnails;
 		let oActiveObj		= oDoc.GetActiveObject();
 
+		if (oActiveObj && oDoc.HasSelectedButtonWithUnreadIcons()) {
+			this.sendEvent("asc_onError", Asc.c_oAscError.ID.CopyDisabled, Asc.c_oAscError.Level.NoCritical);
+			return false;
+		}
+
 		function processClipboardData(_selectedText, _formats, _clipboard) {
 			let _data, sBase64;
 		
@@ -5040,6 +5045,9 @@
 	};
 	PDFEditorApi.prototype.onDocumentContentReady = function() {
 		AscCommon.DocumentEditorApi.prototype.onDocumentContentReady.call(this);
+		let file = this.DocumentRenderer.file;
+		if (file)
+			file.showDrawingWarning(this);
 
 		let _t = this;
 		let thumbnailsDivId = "thumbnails-list";

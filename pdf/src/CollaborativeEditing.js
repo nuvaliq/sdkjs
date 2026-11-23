@@ -46,6 +46,7 @@ function CPDFCollaborativeEditing(oDoc) {
     this.m_oLogicDocument = oDoc;
     this.m_oSelectedObjects = {};
     this.m_aEndLoadCallbacks = [];
+    this.m_oImportedButtons = new Set();
 }
 
 CPDFCollaborativeEditing.prototype = Object.create(AscCommon.CWordCollaborativeEditing.prototype);
@@ -340,6 +341,15 @@ CPDFCollaborativeEditing.prototype.Apply_Changes = function(fEndCallBack) {
 };
 CPDFCollaborativeEditing.prototype.OnEnd_ReadForeignChanges = function() {
 	AscCommon.CCollaborativeEditingBase.prototype.OnEnd_ReadForeignChanges.apply(this, arguments);
+    let oButtons = this.m_oImportedButtons;
+    if (oButtons.size > 0) {
+        this.m_oImportedButtons = new Set();
+        // The merge payload already contains the original appearances.
+        let aButtons = Array.from(oButtons).filter(function(oButton) {
+            return oButton.GetParentPage();
+        });
+        this.GetDocument().private_FillButtonsIconsOnOpen(aButtons, true);
+    }
 };
 CPDFCollaborativeEditing.prototype.Check_MergeData = function() {};
 CPDFCollaborativeEditing.prototype.Release_Locks = function() {

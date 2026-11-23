@@ -1619,7 +1619,7 @@ CChangesPDFPushbuttonImage.prototype.private_SetValue = function(Value)
 	let oButtonField = this.Class;
 	oButtonField.lastValue = Value;
 
-	oButtonField.SetImageRasterId(Value, this.APType);
+	let sRasterId = oButtonField.SetImageRasterIdFromHistory(Value, this.APType);
 
 	if (this.FromLoad && typeof Value === "string" && Value.length > 0) {
 		let sImageId = AscCommon.getFullImageSrc2(Value);
@@ -1637,7 +1637,7 @@ CChangesPDFPushbuttonImage.prototype.private_SetValue = function(Value)
 		}.bind(oButtonField));
 	}
 	else {
-		oButtonField.SetImage(Value);
+		oButtonField.SetImage(sRasterId);
 	}
 };
 
@@ -1718,7 +1718,8 @@ CChangesPDFPushbuttonLayout.prototype.Type = AscDFH.historyitem_Pdf_Pushbutton_L
 CChangesPDFPushbuttonLayout.prototype.private_SetValue = function(Value)
 {
 	let oField = this.Class;
-	oField.SetLayout(Value);
+	// Image edits, if any, have their own history changes.
+	oField.SetLayout(Value, true);
 };
 
 /**
@@ -1752,7 +1753,7 @@ CChangesPDFPushbuttonHighlightType.prototype.Type = AscDFH.historyitem_Pdf_Pushb
 CChangesPDFPushbuttonHighlightType.prototype.private_SetValue = function(Value)
 {
 	let oField = this.Class;
-	oField.SetHighlight(Value);
+	oField.SetHighlight(Value, true);
 };
 
 /**

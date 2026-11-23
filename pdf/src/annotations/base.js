@@ -735,8 +735,10 @@
         
         let oApearanceInfo = this.GetOriginViewInfo(nPageW, nPageH);
         let oSavedView, oApInfoTmp;
-        if (!oApearanceInfo)
+        if (!oApearanceInfo) {
+            oFile.recordAppearanceFailure("getAnnotationsAP", this.GetOriginPage(), nPageW, nPageH, this.IsStamp() ? this.GetApIdx() : undefined);
             return null;
+        }
             
         oApInfoTmp = oApearanceInfo["N"];
         
@@ -800,15 +802,12 @@
         let nApIdx = this.GetApIdx();
 
         if (oOriginPage.annotsAPInfo == null || oOriginPage.annotsAPInfo.size.w != nPageW || oOriginPage.annotsAPInfo.size.h != nPageH) {
-            oOriginPage.annotsAPInfo = {
-                info: oFile.nativeFile["getAnnotationsAP"](nPage, nPageW, nPageH),
-                size: {
-                    w: nPageW,
-                    h: nPageH
-                }
-            }
+            oOriginPage.annotsAPInfo = oFile.getAppearanceInfo("getAnnotationsAP", nPage, nPageW, nPageH);
         }
         
+        if (!oOriginPage.annotsAPInfo)
+            return null;
+
         for (let i = 0; i < oOriginPage.annotsAPInfo.info.length; i++) {
             if (oOriginPage.annotsAPInfo.info[i]["i"] == nApIdx)
                 return oOriginPage.annotsAPInfo.info[i];

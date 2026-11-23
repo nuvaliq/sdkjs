@@ -2375,8 +2375,11 @@
                 break;
         }
 
-		if (!oApearanceInfo && !oSavedView)
+		if (!oApearanceInfo && !oSavedView) {
+            let method = this.IsLink && this.IsLink() ? "getAnnotationsAP" : "getInteractiveFormsAP";
+            oFile.recordAppearanceFailure(method, this.GetOriginPage(), nPageW, nPageH);
             return null;
+        }
 
         if (oSavedView && (!oApearanceInfo || oSavedView.width == oApearanceInfo["w"] && oSavedView.height == oApearanceInfo["h"]))
             return oSavedView;
@@ -2456,15 +2459,12 @@
         });
 
         if (oOriginPage.fieldsAPInfo == null || oOriginPage.fieldsAPInfo.size.w != nPageW || oOriginPage.fieldsAPInfo.size.h != nPageH) {
-            oOriginPage.fieldsAPInfo = {
-                info: oFile.nativeFile["getInteractiveFormsAP"](nPage, nPageW, nPageH),
-                size: {
-                    w: nPageW,
-                    h: nPageH
-                }
-            }
+            oOriginPage.fieldsAPInfo = oFile.getAppearanceInfo("getInteractiveFormsAP", nPage, nPageW, nPageH);
         }
         
+        if (!oOriginPage.fieldsAPInfo)
+            return null;
+
         for (let i = 0; i < oOriginPage.fieldsAPInfo.info.length; i++) {
             if (oOriginPage.fieldsAPInfo.info[i]["i"] == this._apIdx) {
 				let oInfo = oOriginPage.fieldsAPInfo.info.splice(i, 1)[0];

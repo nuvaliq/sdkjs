@@ -381,15 +381,12 @@
         let nApIdx      = this.GetApIdx();
 
         if (this.APInfo == null || this.APInfo.size.w != nPageW || this.APInfo.size.h != nPageH) {
-            this.APInfo = {
-                info: oFile.nativeFile["getAnnotationsAP"](nPage, nPageW, nPageH, undefined, nApIdx),
-                size: {
-                    w: nPageW,
-                    h: nPageH
-                }
-            }
+            this.APInfo = oFile.getAppearanceInfo("getAnnotationsAP", nPage, nPageW, nPageH, nApIdx);
         }
         
+        if (!this.APInfo)
+            return null;
+
         for (let i = 0; i < this.APInfo.info.length; i++) {
             if (this.APInfo.info[i]["i"] == nApIdx)
                 return this.APInfo.info[i];

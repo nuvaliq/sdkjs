@@ -100,7 +100,7 @@
 	 * @param {boolean} [oParams.annotations=false] - Specifies whether the annotations will be rendered.
 	 * @param {boolean} [oParams.fields=false] - Specifies whether the fields will be rendered.
 	 * @param {boolean} [oParams.drawings=false] - Specifies whether the drawings will be rendered.
-	 * @returns {canvas}
+	 * @returns {string|null} A PNG data URL, or null if the engine failed to render requested content.
 	 * @see office-js-api/Examples/Plugins/PDF/Api/Methods/GetPageImage.js
 	 */
 	Api.prototype["pluginMethod_GetPageImage"] = function(nPage, oParams) {
@@ -130,7 +130,14 @@
 		nWidthPx = nWidthPx >> 0;
 		nHeightPx = nHeightPx >> 0;
 
-		let image = !oFile.pages[nPage].isRecognized ? oFile.getPage(nPage, nWidthPx, nHeightPx, undefined, 0xFFFFFF) : null;
+		let page = oFile.pages[nPage];
+		let image = null;
+		if (!page.isRecognized && page.originIndex != null) {
+			image = oFile.getPage(nPage, nWidthPx, nHeightPx, undefined, 0xFFFFFF);
+			if (oFile.pageRenderFailed) {
+				return null;
+			}
+		}
 
 		if (!image) {
 			let pageColor = this.getPageBackgroundColor();
@@ -154,12 +161,19 @@
 		if (oParams['drawings']) {
 			oViewer._drawDrawingsOnCtx(nPage, ctx);
 		}
-		if (oParams['annotations']) {
-			oViewer._drawMarkupAnnotsOnCtx(nPage, ctx);
-			oViewer._drawAnnotsOnCtx(nPage, ctx);
-		}
-		if (oParams['fields']) {
-			oViewer._drawFieldsOnCtx(nPage, ctx, false, true);
+		if (oParams['annotations'] || oParams['fields']) {
+			let rendered = oFile.renderAppearances(function() {
+				if (oParams['annotations']) {
+					oViewer._drawMarkupAnnotsOnCtx(nPage, ctx);
+					oViewer._drawAnnotsOnCtx(nPage, ctx);
+				}
+				if (oParams['fields']) {
+					oViewer._drawFieldsOnCtx(nPage, ctx, false, true);
+				}
+			});
+			if (!rendered) {
+				return null;
+			}
 		}
 
 		return ctx.canvas.toDataURL("image/png");

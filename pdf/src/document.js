@@ -3512,10 +3512,14 @@ var CPresentation = CPresentation || function(){};
         }
         
         let oFieldsMap = {};
+        let aButtons = [];
 
         for (let i = 0; i < oFormsInfo["Fields"].length; i++) {
             let oFormInfo = oFormsInfo["Fields"][i];
             let oForm = AscPDF.ReadFieldFromJSON(oFormInfo, this);
+            if (oForm.GetType() === AscPDF.FIELD_TYPES.button) {
+                aButtons.push(oForm);
+            }
 
             let oPagesInfo = this.GetPageInfo(pageOffset + oFormInfo["page"]);
             oPagesInfo.AddField(oForm);
@@ -3562,7 +3566,7 @@ var CPresentation = CPresentation || function(){};
         if (Array.isArray(oFormsInfo["CO"]) && oFormsInfo["CO"].length > 0)
             this.GetCalculateInfo().SetCalculateOrder(oFormsInfo["CO"]);
         
-        this.private_FillButtonsIconsOnOpen();
+        this.private_FillButtonsIconsOnOpen(aButtons);
     };
     CPDFDoc.prototype.private_FillFormsParents = function(aParentsInfo) {
         let oChildsMap = this.GetFieldsChildsMap();
@@ -3638,92 +3642,116 @@ var CPresentation = CPresentation || function(){};
             });
         }
     };
-    CPDFDoc.prototype.private_FillButtonsIconsOnOpen = function() {
-		let oViewer = editor.getDocumentRenderer();
-        let oDoc = this;
+    CPDFDoc.prototype.private_FillButtonsIconsOnOpen = function(aButtons, bFromLoad) {
+        let oViewer = this.Viewer;
+        let oFile = oViewer.file;
+        let oButtonsByPage = new Map();
+        let oIconsBySource = new Map();
+        let aAppearances = [
+            ["I", AscPDF.APPEARANCE_TYPES.normal],
+            ["RI", AscPDF.APPEARANCE_TYPES.rollover],
+            ["IX", AscPDF.APPEARANCE_TYPES.mouseDown]
+        ];
 
-        let aIconsToLoad = [];
-        let oIconsInfo = {
-            "MK": [],
-            "View": []
-        };
+        for (let oButton of aButtons) {
+            let nPage = oButton.GetOriginPage();
+            let oButtonsById = oButtonsByPage.get(nPage);
+            if (!oButtonsById) {
+                oButtonsById = new Map();
+                oButtonsByPage.set(nPage, oButtonsById);
+            }
+            oButtonsById.set(oButton.GetApIdx(), oButton);
+        }
 
-        for (let i = 0; i < oViewer.file.pages.length; i++) {
-            let oPage = oViewer.file.pages[i];
-            
-            let w = (((oPage.W * 96 / oPage.Dpi) >> 0) * AscCommon.AscBrowser.retinaPixelRatio) >> 0;
-            let h = (((oPage.H * 96 / oPage.Dpi) >> 0) * AscCommon.AscBrowser.retinaPixelRatio) >> 0;
+        function readIcons(oIconsInfo, oButtonsById) {
+            if (!oIconsInfo["View"])
+                return;
 
-            let oFile = oViewer.file;
-            let oPageIconsInfo = oFile.nativeFile["getButtonIcons"](i, w, h, undefined, true);
+            let oSourcesById = new Map();
+            for (let oView of oIconsInfo["View"]) {
+                let sBase64 = oView["retValue"];
+                if (sBase64) {
+                    let sFormat = sBase64.startsWith("/9j/") ? "jpeg" : "png";
+                    oSourcesById.set(oView["j"], "data:image/" + sFormat + ";base64," + sBase64);
+                }
+            }
 
-            if (oPageIconsInfo["View"] == null)
+            for (let oMK of oIconsInfo["MK"]) {
+                let oButton = oButtonsById.get(oMK["i"]);
+                if (!oButton)
+                    continue;
+
+                for (let [sAppearance, nType] of aAppearances) {
+                    if (oMK[sAppearance] == null)
+                        continue;
+
+                    // Preserve the original while the image is still being decoded.
+                    if (!oButton.SetOriginalIconUnavailable(nType))
+                        continue;
+                    let sSource = oSourcesById.get(oMK[sAppearance]);
+                    if (sSource) {
+                        let aIcons = oIconsBySource.get(sSource);
+                        if (!aIcons) {
+                            aIcons = [];
+                            oIconsBySource.set(sSource, aIcons);
+                        }
+                        aIcons.push([oButton, nType]);
+                    }
+                }
+            }
+
+            for (let oButton of oButtonsById.values()) {
+                for (let [, nType] of aAppearances) {
+                    if (oButton.SetMissingOriginalIcon(nType))
+                        oViewer.isRepaint = true;
+                }
+            }
+        }
+
+        for (let oPage of oFile.pages) {
+            let nPage = oPage.originIndex;
+            let oButtonsById = oButtonsByPage.get(nPage);
+            if (!oButtonsById)
                 continue;
 
-            oIconsInfo["MK"] = oIconsInfo["MK"].concat(oPageIconsInfo["MK"]);
-            oIconsInfo["View"] = oIconsInfo["View"].concat(oPageIconsInfo["View"]);
+            let w = (((oPage.W * 96 / oPage.Dpi) >> 0) * AscCommon.AscBrowser.retinaPixelRatio) >> 0;
+            let h = (((oPage.H * 96 / oPage.Dpi) >> 0) * AscCommon.AscBrowser.retinaPixelRatio) >> 0;
+            let oPageIcons = oFile.nativeFile["getButtonIcons"](nPage, w, h, undefined, true);
+            if (oPageIcons !== null) {
+                readIcons(oPageIcons, oButtonsById);
+                continue;
+            }
 
-            // load images
-            for (let nIcon = 0; nIcon < oPageIconsInfo["View"].length; nIcon++) {
-                let sBase64 = oPageIconsInfo["View"][nIcon]["retValue"];
-
-                aIconsToLoad.push({
-                    Image: {
-                        width: oPageIconsInfo["View"][nIcon]["w"],
-                        height: oPageIconsInfo["View"][nIcon]["h"],
-                    },
-                    src: "data:image/png;base64," + sBase64
-                });
-
-                for (let nField = 0; nField < oPageIconsInfo["MK"].length; nField++) {
-                    if (oPageIconsInfo["MK"][nField]["I"] == oPageIconsInfo["View"][nIcon]["j"]) {
-                        oPageIconsInfo["MK"][nField]["I"] = aIconsToLoad[aIconsToLoad.length - 1];
-                    }
-                    else if (oPageIconsInfo["MK"][nField]["RI"] == oPageIconsInfo["View"][nIcon]["j"]) {
-                        oPageIconsInfo["MK"][nField]["RI"] = aIconsToLoad[aIconsToLoad.length - 1];
-                    }
-                    else if (oPageIconsInfo["MK"][nField]["IX"] == oPageIconsInfo["View"][nIcon]["j"]) {
-                        oPageIconsInfo["MK"][nField]["IX"] = aIconsToLoad[aIconsToLoad.length - 1];
-                    }
-                }
+            for (let oButton of oButtonsById.values()) {
+                for (let [, nType] of aAppearances)
+                    oButton.SetOriginalIconUnavailable(nType);
             }
         }
 
-        if (aIconsToLoad.length === 0) {
-            oViewer.IsOpenFormsInProgress = false;
-            return;
-        }
-
+        let bNative = window["NATIVE_EDITOR_ENJINE"];
+        let oImageLoader = Asc.editor.ImageLoader;
         function onLoadImages() {
-            // only set ImageData. We'll recalculate the form and add the image after the form changes, to avoid loading fonts
-            for (let nBtn = 0; nBtn < oIconsInfo["MK"].length; nBtn++) {
-                let oBtnField = oDoc.GetFieldByApIdx(oIconsInfo["MK"][nBtn]["i"]);
-				if (!oBtnField) {
-					continue;
-				}
+            if (oViewer.file !== oFile)
+                return;
 
-                if (oIconsInfo["MK"][nBtn]["I"]) {
-                    oBtnField.SetImageRasterId(oIconsInfo["MK"][nBtn]["I"].src, AscPDF.APPEARANCE_TYPES.normal);
-                }
-                if (oIconsInfo["MK"][nBtn]["RI"]) {
-                    oBtnField.SetImageRasterId(oIconsInfo["MK"][nBtn]["RI"].src, AscPDF.APPEARANCE_TYPES.rollover);
-                }
-                if (oIconsInfo["MK"][nBtn]["IX"]) {
-                    oBtnField.SetImageRasterId(oIconsInfo["MK"][nBtn]["IX"].src, AscPDF.APPEARANCE_TYPES.mouseDown);
+            for (let [sSource, aIcons] of oIconsBySource) {
+                let oImage = bNative ? null : oImageLoader.map_image_index[sSource];
+                if (bNative || (oImage && oImage.Image)) {
+                    for (let [oButton, nType] of aIcons) {
+                        if (oButton.SetOriginalIcon(sSource, nType)) {
+                            oViewer.isRepaint = true;
+                        }
+                    }
                 }
             }
-            oViewer.isRepaint = true;
-            oViewer.IsOpenFormsInProgress = false;
+            if (!bFromLoad)
+                oViewer.IsOpenFormsInProgress = false;
         }
-        
-        if (window["NATIVE_EDITOR_ENJINE"]) {
-			onLoadImages();
-		}
-        else {
-            Asc.editor.ImageLoader.LoadImagesWithCallback(aIconsToLoad.map(function(info) {
-                return info.src;
-            }), onLoadImages);
-        }
+
+        if (oIconsBySource.size === 0 || bNative)
+            onLoadImages();
+        else
+            oImageLoader.LoadImagesWithCallback(Array.from(oIconsBySource.keys()), onLoadImages);
     };
     /**
 	 * Adds an annot to document by annot props.
@@ -5193,11 +5221,30 @@ var CPresentation = CPresentation || function(){};
             Asc.editor.sendEvent('asc_onCanPastePage', !this.IsMergeLock() && !Asc.editor.isRestrictionView());
         }
     };
+    CPDFDoc.prototype.HasSelectedButtonWithUnreadIcons = function() {
+        let oThumbnails = this.Viewer.thumbnails;
+        let oController = this.GetController();
+        if (!oController || (oThumbnails && oThumbnails.isInFocus) || AscFormat.getTargetTextObject(oController))
+            return false;
+
+        let oGroup = oController.selection.groupSelection;
+        let aObjects = oGroup && !oGroup.IsAnnot() ? oGroup.spTree : oController.selectedObjects;
+        return aObjects.some(function(oShape) {
+            if (!oShape.selected || !oShape.IsEditFieldShape())
+                return false;
+
+            let oField = oShape.GetEditField();
+            return oField.GetType() === AscPDF.FIELD_TYPES.button && oField.HasUnreadOriginalIcons();
+        });
+    };
     CPDFDoc.prototype.CanCopyCut = function() {
         let _t              = this;
         let oViewer         = editor.getDocumentRenderer();
         if (!oViewer.file)
             return false;
+
+        if (this.HasSelectedButtonWithUnreadIcons())
+            return { copy: false, cut: false };
 
         let oActiveForm     = this.activeForm;
         let oActiveAnnot    = this.mouseDownAnnot;
@@ -9608,7 +9655,7 @@ var CPresentation = CPresentation || function(){};
 
         // button
         if (formJson["position"] != null) {
-            oForm.SetLayout(formJson["position"]);
+            oForm.SetLayout(formJson["position"], true);
         }
         if (formJson["caption"] != null && oForm["type"] == AscPDF.FIELD_TYPES.button) {
             oForm.SetCaption(formJson["caption"]);
@@ -9621,7 +9668,7 @@ var CPresentation = CPresentation || function(){};
         }
         
         if (formJson["highlight"] != null) {
-            oForm.SetHighlight(formJson["highlight"]);
+            oForm.SetHighlight(formJson["highlight"], true);
         }
         if (formJson["IF"] != null) {
             if (formJson["IF"]["FB"] != null)

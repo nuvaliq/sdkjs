@@ -89,6 +89,12 @@
                 normal:     false,
                 mouseDown:  false,
                 rollover:   false
+            },
+            // Retain the original separately from edits so history can restore it.
+            originalIcons: {
+                normal: {},
+                mouseDown: {},
+                rollover: {}
             }
         };
 
@@ -199,15 +205,56 @@
         }
     };
     CPushButtonField.prototype.GetImageRasterId = function(nAPType) {
+        return this._imgData[getImageAppearanceKey(nAPType) || "normal"] || "";
+    };
+    function getImageAppearanceKey(nAPType) {
         switch (nAPType) {
             case AscPDF.APPEARANCE_TYPES.rollover:
-                return this._imgData.rollover;
+                return "rollover";
             case AscPDF.APPEARANCE_TYPES.mouseDown:
-                return this._imgData.mouseDown;
+                return "mouseDown";
             case AscPDF.APPEARANCE_TYPES.normal:
-            default:
-                return this._imgData.normal;
+            case null:
+            case undefined:
+                return "normal";
         }
+    }
+    CPushButtonField.prototype.SetOriginalIconUnavailable = function(nAPType) {
+        let sAppearance = getImageAppearanceKey(nAPType);
+        let oOriginalIcon = this._imgData.originalIcons[sAppearance];
+        if (!oOriginalIcon || oOriginalIcon.requested)
+            return false;
+
+        oOriginalIcon.requested = true;
+        if (!oOriginalIcon.edited) {
+            this.private_SetImageRasterId(undefined, sAppearance);
+            this.SetNeedUpdateImage(true);
+        }
+        return true;
+    };
+    CPushButtonField.prototype.SetOriginalIcon = function(sRasterId, nAPType) {
+        let sAppearance = getImageAppearanceKey(nAPType);
+        let oOriginalIcon = this._imgData.originalIcons[sAppearance];
+        if (!oOriginalIcon || oOriginalIcon.rasterId !== undefined)
+            return false;
+
+        oOriginalIcon.requested = true;
+        oOriginalIcon.rasterId = sRasterId;
+        if (oOriginalIcon.edited || sRasterId === this._imgData[sAppearance])
+            return false;
+
+        this.private_SetImageRasterId(sRasterId, sAppearance);
+        if (sAppearance === "normal")
+            this.imageChecked = false;
+        this.SetNeedUpdateImage(true);
+        return true;
+    };
+    CPushButtonField.prototype.SetMissingOriginalIcon = function(nAPType) {
+        let oOriginalIcon = this._imgData.originalIcons[getImageAppearanceKey(nAPType)];
+        return oOriginalIcon && !oOriginalIcon.requested && this.SetOriginalIcon("", nAPType);
+    };
+    CPushButtonField.prototype.HasUnreadOriginalIcons = function() {
+        return this._imgData.normal === undefined || this._imgData.rollover === undefined || this._imgData.mouseDown === undefined;
     };
     /**
      * Sets image only for this pushbutton (without commiting). Needs for history.
@@ -263,7 +310,7 @@
             return;
         }
         
-		if (!sRasterId)
+		if (!sRasterId || this.GetLayout() === position["textOnly"])
 			return this._RemoveImage();
 		
         let oImgData = null;
@@ -291,8 +338,6 @@
 
         let nHeaderPos = this.GetLayout();
         switch (nHeaderPos) {
-            case position["textOnly"]:
-                return;
             case position["iconTextH"]:
             case position["textIconH"]:
                 let oPara = this.content.GetElement(0);
@@ -479,15 +524,17 @@
      * @param {number} nType - AscPDF.BUTTON_HIGHLIGHT_TYPES
      * @typeofeditors ["PDF"]
      */
-    CPushButtonField.prototype.SetHighlight = function(nType) {
+    CPushButtonField.prototype.SetHighlight = function(nType, bPreserveIcons) {
         AscCommon.History.Add(new CChangesPDFPushbuttonHighlightType(this, this._highlight, nType));
 
         this._highlight = nType;
 
         if (nType != AscPDF.BUTTON_HIGHLIGHT_TYPES.push) {
             this.asc_curImageState = undefined;
-            this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.mouseDown);
-            this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.rollover);
+            if (!bPreserveIcons) {
+                this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.mouseDown);
+                this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.rollover);
+            }
         }
 
         this.SetWasChanged(true);
@@ -819,55 +866,51 @@
         this.DrawLocks(oGraphicsPDF);
         this.DrawEdit(oGraphicsWord);
     };
+    CPushButtonField.prototype.private_SetImageRasterId = function(sRasterId, sAppearance) {
+        this._imgData[sAppearance] = sRasterId;
+        this._imgData.changedInfo[sAppearance] = true;
+    };
     CPushButtonField.prototype.SetImageRasterId = function(sRasterId, nAPType) {
-		if (sRasterId == undefined) {
-			sRasterId = "";
-		}
-
-        let sPrevRasterId;
-
-        if (undefined == nAPType) {
-            nAPType = AscPDF.APPEARANCE_TYPES.normal;
-        }
-
-        switch (nAPType) {
-            case AscPDF.APPEARANCE_TYPES.rollover:
-				sPrevRasterId           = this._imgData.rollover;
-				if (sRasterId == sPrevRasterId) {
-					return;
-				}
-
-                this._imgData.rollover  = sRasterId;
-                this._imgData.changedInfo.rollover = true;
-                break;
-            case AscPDF.APPEARANCE_TYPES.mouseDown:
-                sPrevRasterId           = this._imgData.mouseDown;
-				if (sRasterId == sPrevRasterId) {
-					return;
-				}
-
-                this._imgData.mouseDown = sRasterId;
-                this._imgData.changedInfo.mouseDown = true;
-                break;
-            case AscPDF.APPEARANCE_TYPES.normal:
-                sPrevRasterId           = this._imgData.normal;
-				if (sRasterId == sPrevRasterId) {
-					return;
-				}
-				
-                this._imgData.normal    = sRasterId;
-                this._imgData.changedInfo.normal = true;
-                break;
-        }
-
-        if (!sPrevRasterId && !sRasterId) {
+        let sAppearance = getImageAppearanceKey(nAPType);
+        if (sAppearance === undefined)
             return;
-        }
 
-        AscCommon.History.Add(new CChangesPDFPushbuttonImage(this, sPrevRasterId, sRasterId, nAPType));
+        if (sRasterId == null)
+            sRasterId = "";
+
+        let sPrevRasterId = this._imgData[sAppearance];
+        if (sRasterId == sPrevRasterId)
+            return;
+
+        let oHistory = AscCommon.History;
+        if (oHistory.IsOn() && !oHistory.UndoRedoInProgress)
+            this._imgData.originalIcons[sAppearance].edited = true;
+
+        this.private_SetImageRasterId(sRasterId, sAppearance);
+        if (nAPType == null)
+            nAPType = AscPDF.APPEARANCE_TYPES.normal;
+        oHistory.Add(new CChangesPDFPushbuttonImage(this, sPrevRasterId, sRasterId, nAPType));
 
         this.SetNeedUpdateImage(true);
         this.SetWasChanged(true);
+    };
+    CPushButtonField.prototype.SetImageRasterIdFromHistory = function(sRasterId, nAPType) {
+        let sAppearance = getImageAppearanceKey(nAPType);
+        if (sAppearance === undefined)
+            return sRasterId;
+
+        let oOriginalIcon = this._imgData.originalIcons[sAppearance];
+        oOriginalIcon.edited = sRasterId !== undefined;
+        if (!oOriginalIcon.edited)
+            sRasterId = oOriginalIcon.rasterId;
+        else if (sRasterId === null)
+            sRasterId = "";
+
+        if (sRasterId != this._imgData[sAppearance]) {
+            this.private_SetImageRasterId(sRasterId, sAppearance);
+            this.SetNeedUpdateImage(true);
+        }
+        return sRasterId;
     };
     CPushButtonField.prototype.Reassign_ImageUrls = function(oImages) {
         let _t = this;
@@ -1075,6 +1118,9 @@
         }
     };
     CPushButtonField.prototype.CheckImageOnce = function() {
+        if (this.GetLayout() === position["textOnly"])
+            return;
+
         // on open we didn't fill form content, but if there's no appearance, then we draw ourselves, need to fill form with content
         let oDrawing = this.GetDrawing();
         if (!oDrawing && !this.IsNeedDrawFromStream() && !this.imageChecked) {
@@ -1609,12 +1655,12 @@
      * @param {number} nType
      * @typeofeditors ["PDF"]
      */
-    CPushButtonField.prototype.SetLayout = function(nType) {
+    CPushButtonField.prototype.SetLayout = function(nType, bPreserveIcons) {
         AscCommon.History.Add(new CChangesPDFPushbuttonLayout(this, this.GetLayout(), nType));
 
         switch (nType) {
             case position["textOnly"]:
-                this.SetTextOnly();
+                this.SetTextOnly(bPreserveIcons);
                 break;
             case position["iconOnly"]:
                 this.SetIconOnly();
@@ -1699,7 +1745,7 @@
 
         return oIconPos;
     };
-    CPushButtonField.prototype.SetTextOnly = function() {
+    CPushButtonField.prototype.SetTextOnly = function(bPreserveIcons) {
         if (this._buttonPosition == position["textOnly"])
             return;
 
@@ -1734,9 +1780,13 @@
         this.SetImage('');
         AscCommon.History.EndNoHistoryMode();
 
-        this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.normal);
-        this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.rollover);
-        this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.mouseDown);
+        if (bPreserveIcons) {
+            this.imageChecked = false;
+        } else {
+            this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.normal);
+            this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.rollover);
+            this.SetImageRasterId('', AscPDF.APPEARANCE_TYPES.mouseDown);
+        }
 
         this.SetWasChanged(true);
         this.SetNeedRecalc(true);
@@ -2195,12 +2245,17 @@
             return canvas.toDataURL('image/png');
         }
 
-        function WriteImage(memory, nImgType) {
+        function WriteImage(memory, nImgType, nFlag) {
+            // Leave unread appearances out of the update so the original PDF retains them.
+            if (this._imgData[getImageAppearanceKey(nImgType)] === undefined)
+                return;
+
+            nButtonFlags |= (1 << nFlag);
             let sPathToImg = AscCommon.getFullImageSrc2(this.GetImageRasterId(nImgType));
             let nExistIdx = memory.images.indexOf(sPathToImg);
-            if ((memory.isForSplit || memory.isCopyPaste) && sPathToImg) {
+            if ((memory.isForSplit || memory.isCopyPaste) && sPathToImg && !sPathToImg.startsWith("data:image/png;base64,iVBORw0KGgo")) {
                 let mapItem = Asc.editor.ImageLoader.map_image_index[sPathToImg];
-                if (mapItem) {
+                if (mapItem && mapItem.Image) {
                     let oImageElm = mapItem.Image;
                     sPathToImg = getBase64FromImage(oImageElm);
                 }
@@ -2218,29 +2273,9 @@
             
         }
 
-        // not supported in server side now
-        // if (this.IsImageChanged(AscPDF.APPEARANCE_TYPES.normal)) {
-        //     nButtonFlags |= (1 << 5);
-        //     WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.normal);
-            
-        // }
-        // if (this.IsImageChanged(AscPDF.APPEARANCE_TYPES.rollover)) {
-        //     nButtonFlags |= (1 << 6);
-        //     WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.rollover);
-        // }
-        // if (this.IsImageChanged(AscPDF.APPEARANCE_TYPES.mouseDown)) {
-        //     nButtonFlags |= (1 << 7);
-        //     WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.mouseDown);
-        // }
-
-        nButtonFlags |= (1 << 5);
-        WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.normal);
-
-        nButtonFlags |= (1 << 6);
-        WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.rollover);
-        
-        nButtonFlags |= (1 << 7);
-        WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.mouseDown);
+        WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.normal, 5);
+        WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.rollover, 6);
+        WriteImage.call(this, memory, AscPDF.APPEARANCE_TYPES.mouseDown, 7);
 
         let nEndPos = memory.GetCurPosition();
 

@@ -539,6 +539,12 @@ CChangesPDFDocumentFieldsContent.prototype.private_InsertInArrayLoad = function(
         oItem._page = oPage.GetIndex();
         oItem.selectStartPage = oItem._page;
 
+        if (oItem.GetType() === AscPDF.FIELD_TYPES.button) {
+            let nOriginPage = oItem.GetOriginPage();
+            if (nOriginPage != null && nOriginPage === oPage.GetOriginIndex())
+                oDocument.CollaborativeEditing.m_oImportedButtons.add(oItem);
+        }
+
         oItem.AddToRedraw();
     }
 
@@ -1248,6 +1254,9 @@ CChangesPDFDocumentEndMergePages.prototype.Undo = function() {
     oFile.nativeFile["UndoMergePages"]();
 
     let aPages = oFile.nativeFile["getPagesInfo"]();
+    // A subsequent import can reuse the origin indices of the removed pages.
+    if (aPages.length < oFile.originalPagesCount)
+        oFile.nativeFile["clearDrawingFailuresFrom"](aPages.length);
     oFile.originalPagesCount = aPages.length;
 };
 CChangesPDFDocumentEndMergePages.prototype.Redo = function()
