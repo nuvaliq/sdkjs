@@ -283,12 +283,19 @@
 			var oApi = Asc.editor;
 			// Apply changes
 			if (0 < length) {
+				var loadGeneration = oApi ? (oApi.documentLoadGeneration || 0) : 0;
 				//splice to prevent double apply other changes in case of load fonts
 				oApi.sendEvent("asc_onBeforeApplyChanges");
+				if (oApi && (oApi.documentLoadGeneration || 0) !== loadGeneration) {
+					return false;
+				}
 				var changes = t.m_arrChanges.splice(0, length);
 				this.handlers.trigger("applyChanges", changes, function () {
 					t.handlers.trigger("updateAfterApplyChanges");
 				}, oColor);
+				if (oApi && (oApi.documentLoadGeneration || 0) !== loadGeneration) {
+					return false;
+				}
 				oApi.sendEvent("asc_onApplyChanges");
 
 				return false;

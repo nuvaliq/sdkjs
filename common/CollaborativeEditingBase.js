@@ -235,6 +235,8 @@
         this.m_oOwnChanges        = [];
 
 		this.m_fEndLoadCallBack   = null;
+		this.m_bApplyChangesInProgress = false;
+		this.m_bRecalculatePausedByApplyChanges = false;
 
 		this.m_aExternalChanges = [];
 		this.m_nExternalIndex0  = -1;
@@ -275,6 +277,12 @@
         this.m_aCheckLocks = [];
         this.m_aCheckLocksInstance = [];
         this.m_aNewImages = [];
+		this.m_fEndLoadCallBack = null;
+		this.m_bApplyChangesInProgress = false;
+		this.m_bRecalculatePausedByApplyChanges = false;
+		this.waitingImagesForLoad = false;
+		if (Array.isArray(this.m_arrChanges))
+			this.m_arrChanges.length = 0;
 
 		this.CoHistory.clear();
     };
@@ -359,6 +367,9 @@
     };
     CCollaborativeEditingBase.prototype.Apply_Changes = function(fEndCallBack)
     {
+		if (this.m_bApplyChangesInProgress || this.m_bRecalculatePausedByApplyChanges)
+			return;
+
 		if (this.m_nUndoBeforeApply)
 		{
 			let state   = this._PreUndo();
@@ -369,12 +380,24 @@
 		
         if (this.m_aChanges.length > 0)
         {
-            this.GetEditorApi().sendEvent("asc_onBeforeApplyChanges");
+            var oApi = this.GetEditorApi() || (window.Asc && window.Asc.editor) || window.editor;
+            var generation = oApi.documentLoadGeneration || 0;
+            oApi.sendEvent("asc_onBeforeApplyChanges");
+            if ((oApi.documentLoadGeneration || 0) !== generation)
+                return;
             AscFonts.IsCheckSymbols = true;
-            (Asc.editor || editor).WordControl.m_oLogicDocument.PauseRecalculate();
-            (Asc.editor || editor).WordControl.m_oLogicDocument.EndPreview_MailMergeResult();
+            oApi.WordControl.m_oLogicDocument.PauseRecalculate();
+            this.m_bRecalculatePausedByApplyChanges = true;
+            oApi.WordControl.m_oLogicDocument.EndPreview_MailMergeResult();
 
-            (Asc.editor || editor).sync_StartAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
+            if (oApi.startApplyChangesAction)
+                oApi.startApplyChangesAction();
+            else
+                oApi.sync_StartAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
+            if ((oApi.documentLoadGeneration || 0) !== generation) {
+                AscFonts.IsCheckSymbols = false;
+                return;
+            }
 
             var DocState = this.private_SaveDocumentState();
             this.Clear_NewImages();
@@ -386,7 +409,9 @@
             this.private_RestoreDocumentState(DocState);
             this.OnStart_Load_Objects(fEndCallBack);
             AscFonts.IsCheckSymbols = false;
-            this.GetEditorApi().sendEvent("asc_onApplyChanges");
+            if ((oApi.documentLoadGeneration || 0) !== generation)
+                return;
+            oApi.sendEvent("asc_onApplyChanges");
         }
 		else
 		{
@@ -559,7 +584,7 @@
     };
 
     CCollaborativeEditingBase.prototype.SendImagesUrlsFromChanges = function (aImages) {
-        var rData = {}, oApi = editor || Asc['editor'], i;
+        var rData = {}, oApi = this.GetEditorApi() || (window.Asc && window.Asc.editor) || window.editor, i;
         if(!oApi){
             return;
         }
@@ -575,7 +600,12 @@
         if(false === oApi.isSaveFonts_Images){
             oApi.isSaveFonts_Images = true;
         }
+        var coApi = oApi.CoAuthoringApi;
+        var generation = oApi.documentLoadGeneration || 0;
+        var collaboration = this;
         var callback = function (isTimeout, oRes) {
+            if ((oApi.documentLoadGeneration || 0) !== generation || oApi.CoAuthoringApi !== coApi)
+                return;
             var aData, i, oUrls;
             if(oRes && oRes['status'] === 'ok')
             {
@@ -587,7 +617,7 @@
                 }
                 AscCommon.g_oDocumentUrls.addUrls(oUrls);
             }
-            AscCommon.CollaborativeEditing.SendImagesCallback(aImagesToLoad);
+            collaboration.SendImagesCallback(aImagesToLoad);
         };
 
         if (!oApi.CoAuthoringApi.callPRC(rData, Asc.c_nCommonRequestTime, callback)) {
@@ -596,7 +626,7 @@
     };
 
     CCollaborativeEditingBase.prototype.SendImagesCallback = function (aImages) {
-        var oApi = editor || Asc['editor'];
+        var oApi = this.GetEditorApi() || (window.Asc && window.Asc.editor) || window.editor;
         oApi.pre_Save(aImages);
     };
 
@@ -643,6 +673,7 @@
 
         this.Set_GlobalLock(true);
         this.Set_GlobalLockSelection(true);
+        this.m_bApplyChangesInProgress = true;
         // Call function to load necessary elements (new images and fonts)
         var aImages = this.CollectImagesFromChanges();
         if(aImages.length > 0)
@@ -651,8 +682,32 @@
         }
         else
         {
-            this.SendImagesCallback([].concat(this.m_aNewImages));
+            var images = this.m_aNewImages.slice();
             this.m_aNewImages.length = 0;
+            this.SendImagesCallback(images);
+        }
+    };
+    CCollaborativeEditingBase.prototype.abortPendingApplyChanges = function(oApi)
+    {
+        var wasApplyingChanges = this.m_bApplyChangesInProgress;
+        var wasRecalcPaused = this.m_bRecalculatePausedByApplyChanges;
+        this.m_fEndLoadCallBack = null;
+        this.waitingImagesForLoad = false;
+        if (Array.isArray(this.m_aEndLoadCallbacks))
+            this.m_aEndLoadCallbacks.length = 0;
+
+        this.m_bApplyChangesInProgress = false;
+        this.m_bRecalculatePausedByApplyChanges = false;
+        if (wasApplyingChanges)
+        {
+            this.Set_GlobalLock(false);
+            this.Set_GlobalLockSelection(false);
+        }
+        if (wasRecalcPaused)
+        {
+            var doc = this.m_oLogicDocument || (oApi && oApi.WordControl && oApi.WordControl.m_oLogicDocument);
+            if (doc && doc.RecalcInfo)
+                doc.RecalcInfo.Paused = false;
         }
     };
     CCollaborativeEditingBase.prototype.OnEnd_Load_Objects = function()

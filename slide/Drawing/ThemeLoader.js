@@ -88,8 +88,39 @@ function CThemeLoader()
     this.ThemesUrlAbs = "";
 
     this.IsReloadBinaryThemeEditorNow = false;
+    this.loadSessionId = 0;
+    this.activeXhr = null;
+    this.isLoading = false;
 
     var oThis = this;
+
+    this.cancelLoadTheme = function(notifications)
+    {
+        var wasLoading = this.isLoading;
+        ++this.loadSessionId;
+        if (this.activeXhr)
+        {
+            var xhr = this.activeXhr;
+            this.activeXhr = null;
+            xhr.onload = null;
+            if (xhr.abort)
+                xhr.abort();
+        }
+        if (this.Api)
+        {
+            if (this.Api.FontLoader && this.Api.FontLoader.ThemeLoader === this)
+                this.Api.FontLoader.ThemeLoader = null;
+            if (this.Api.ImageLoader && this.Api.ImageLoader.ThemeLoader === this)
+                this.Api.ImageLoader.ThemeLoader = null;
+        }
+        if (wasLoading && this.CurrentLoadThemeIndex >= 0)
+            this.themes_info_editor[this.CurrentLoadThemeIndex] = null;
+        this.isLoading = false;
+        this.IsReloadBinaryThemeEditorNow = false;
+        this.CurrentLoadThemeIndex = -1;
+        if (wasLoading && this.Api && this.Api.cancelLoadTheme)
+            this.Api.cancelLoadTheme(notifications);
+    };
 
     this.StartLoadTheme = function(indexTheme)
     {
@@ -130,6 +161,8 @@ function CThemeLoader()
             return;
         }
 
+        ++this.loadSessionId;
+        this.isLoading = true;
         this.Api.sync_StartAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.LoadTheme);
 
         // means this theme has not been loaded yet
@@ -143,7 +176,9 @@ function CThemeLoader()
     {
         if (!window["NATIVE_EDITOR_ENJINE"])
         {
+            var sessionId = this.loadSessionId;
             var xhr = new XMLHttpRequest();
+            this.activeXhr = xhr;
             xhr.open('GET', theme_src, true);
 
             if (typeof ArrayBuffer !== 'undefined' && !window.opera)
@@ -156,6 +191,10 @@ function CThemeLoader()
 
             xhr.onload = function()
             {
+                if (oThis.activeXhr === this)
+                    oThis.activeXhr = null;
+                if (sessionId !== oThis.loadSessionId)
+                    return;
                 if (this.readyState == 4 && (this.status == 200 || location.href.indexOf("file:") == 0))
                 {
                     if (typeof ArrayBuffer !== 'undefined' && !window.opera && this.response)
@@ -251,6 +290,8 @@ function CThemeLoader()
 
     this.asyncFontsEndLoaded = function()
     {
+        if (!this.isLoading || this.CurrentLoadThemeIndex < 0)
+            return;
         // font loading completed
         this.Api.FontLoader.ThemeLoader = null;
         this.Api.ImageLoader.ThemeLoader = this;
@@ -265,10 +306,14 @@ function CThemeLoader()
 
     this.asyncImagesEndLoaded = function()
     {
+        if (this.CurrentLoadThemeIndex < 0)
+            return;
+        var themeInfo = this.themes_info_editor[this.CurrentLoadThemeIndex];
+        this.CurrentLoadThemeIndex = -1;
+        this.isLoading = false;
         this.Api.ImageLoader.ThemeLoader = null;
 
-        this.Api.EndLoadTheme(this.themes_info_editor[this.CurrentLoadThemeIndex]);
-        this.CurrentLoadThemeIndex = -1;
+        this.Api.EndLoadTheme(themeInfo);
     };
 }
 

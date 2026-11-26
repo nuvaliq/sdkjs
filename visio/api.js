@@ -282,7 +282,7 @@
 	// Font operations
 	VisioEditorApi.prototype.asyncFontsDocumentStartLoaded = function(blockType)
 	{
-		this.sync_StartAction(undefined === blockType ? Asc.c_oAscAsyncActionType.BlockInteraction : blockType, Asc.c_oAscAsyncAction.LoadDocumentFonts);
+		(this.startFontLoadAction || this.sync_StartAction).call(this, undefined === blockType ? Asc.c_oAscAsyncActionType.BlockInteraction : blockType, Asc.c_oAscAsyncAction.LoadDocumentFonts);
 		var _progress         = this.OpenDocumentProgress;
 		_progress.Type        = Asc.c_oAscAsyncAction.LoadDocumentFonts;
 		_progress.FontsCount  = this.FontLoader.fonts_loading.length;
@@ -302,7 +302,10 @@
 		_progress.CurrentImage = 0;
 	};
 	VisioEditorApi.prototype.asyncFontsDocumentEndLoaded   = function(blockType) {
-		this.sync_EndAction(undefined === blockType ? Asc.c_oAscAsyncActionType.BlockInteraction : blockType, Asc.c_oAscAsyncAction.LoadDocumentFonts);
+		if (this.endFontLoadAction)
+			this.endFontLoadAction();
+		else
+			this.sync_EndAction(undefined === blockType ? Asc.c_oAscAsyncActionType.BlockInteraction : blockType, Asc.c_oAscAsyncAction.LoadDocumentFonts);
 
 		this.EndActionLoadImages = 0;
 
@@ -325,7 +328,7 @@
 		if (_count > 0)
 		{
 			this.EndActionLoadImages = 1;
-			this.sync_StartAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.LoadDocumentImages);
+			(this.startImageLoadAction || this.sync_StartAction).call(this, Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.LoadDocumentImages);
 		}
 
 		this.ImageLoader.bIsLoadDocumentFirst = true;
@@ -336,7 +339,9 @@
 		this.ImageLoader.bIsLoadDocumentFirst = false;
 
 		// this.EndActionLoadImages may change in _openDocumentEndCallback method
-		if (this.EndActionLoadImages == 1)
+		if (this.endImageLoadAction)
+			this.endImageLoadAction();
+		else if (this.EndActionLoadImages == 1)
 		{
 			this.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.LoadDocumentImages);
 		}
@@ -361,7 +366,10 @@
 
 		this.LoadedObject       = null;
 		this.bInit_word_control = true;
+		var loadGeneration = this.documentLoadGeneration || 0;
 		this.onDocumentContentReady();
+		if ((this.documentLoadGeneration || 0) !== loadGeneration)
+			return;
 
 		this.WordControl.InitControl();
 
@@ -458,20 +466,31 @@
 		// this.WordControl.m_oLogicDocument.ImageMap = context.loadDataLinks();
 		AscCommon.pptx_content_loader.Reader.ImageMapChecker = AscCommon.pptx_content_loader.ImageMapChecker;
 		this.Document.ImageMap = xmlParserContext.loadDataLinks();
-		this.ServerIdWaitComplete = true;
+		if (!this.CoAuthoringApi || !this.CoAuthoringApi.get_onlineWork || !this.CoAuthoringApi.get_onlineWork()) {
+			this.ServerIdWaitComplete = true;
+		}
 
 		jsZlib.close();
 		return true;
 	};
-	VisioEditorApi.prototype.asc_CloseFile            = function()
+	VisioEditorApi.prototype.asc_CloseFile            = function(keepServerWaitAction)
 	{
-		AscCommon.History.Clear();
-		AscCommon.g_oTableId.Clear();
-		AscCommon.g_oIdCounter.Clear();
-		this.isApplyChangesOnOpenEnabled = true;
-		this.isDocumentLoadComplete = false;
-		this.turnOffSpecialModes();
-		AscCommon.pptx_content_loader.ImageMapChecker = {};
+		var closeBody = function()
+		{
+			this._closeDocumentLoad(keepServerWaitAction);
+			AscCommon.History.Clear();
+			AscCommon.g_oIdCounter.Clear();
+			AscCommon.g_oTableId.Clear();
+			this.isApplyChangesOnOpenEnabled = true;
+			this.isDocumentLoadComplete = false;
+			this.ServerImagesWaitComplete = false;
+			this.turnOffSpecialModes();
+			AscCommon.pptx_content_loader.ImageMapChecker = {};
+		};
+		if (this._runAbortScope)
+			this._runAbortScope(closeBody);
+		else
+			closeBody.call(this);
 	};
 	VisioEditorApi.prototype.asc_getAppProps = function()
 	{
@@ -486,10 +505,14 @@
 		//todo
 		return;
 	};
-	VisioEditorApi.prototype.asc_PasteData = function(_format, data1, data2, text_data, useCurrentPoint, callback, checkLocks) {
+	VisioEditorApi.prototype.asc_PasteData = function(_format, data1, data2, text_data, useCurrentPoint, callback, checkLocks, rejectCallback) {
 		if (!this.canEdit())
+		{
+			rejectCallback && rejectCallback();
 			return;
+		}
 		//todo
+		rejectCallback && rejectCallback();
 		return;
 	}
 	VisioEditorApi.prototype.onKeyDown = function(e)

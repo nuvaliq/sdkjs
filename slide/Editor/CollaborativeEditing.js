@@ -323,9 +323,11 @@ CCollaborativeEditing.prototype.OnEnd_Load_Objects = function()
 {
     // This function is called when external objects (images and fonts) are loaded
 
-    // Release the lock
-    AscCommon.CollaborativeEditing.Set_GlobalLock(false);
-    AscCommon.CollaborativeEditing.Set_GlobalLockSelection(false);
+    var oApi = this.GetEditorApi() || (window.Asc && window.Asc.editor) || window.editor;
+    this.m_bApplyChangesInProgress = false;
+    this.m_bRecalculatePausedByApplyChanges = false;
+    this.Set_GlobalLock(false);
+    this.Set_GlobalLockSelection(false);
 
     // Start full document recalculation
     let LogicDocument = this.GetPresentation();
@@ -336,7 +338,10 @@ CCollaborativeEditing.prototype.OnEnd_Load_Objects = function()
     LogicDocument.Document_UpdateSelectionState();
     LogicDocument.Document_UpdateInterfaceState();
 
-	Asc.editor.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
+    if (oApi.endApplyChangesAction)
+        oApi.endApplyChangesAction();
+    else
+        oApi.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
 };
 
 CCollaborativeEditing.prototype.OnEnd_CheckLock = function(DontLockInFastMode)

@@ -320,18 +320,36 @@
 	 * @see office-js-api/Examples/Plugins/{Editor}/Api/Methods/PasteHtml.js
 	 */
 	Api.prototype["pluginMethod_PasteHtml"] = function (htmlText) {
-		window.g_asc_plugins && window.g_asc_plugins.setPluginMethodReturnAsync();
-		return this._pluginMethod_PasteHtml(htmlText, function(){
-			window.g_asc_plugins && window.g_asc_plugins.onPluginMethodReturn(true);
+		let isSettled = false;
+		let isAsync = false;
+		let syncResult = false;
+		this._pluginMethod_PasteHtml(htmlText, function(success){
+			let result = false !== success;
+			if (!isAsync)
+			{
+				isSettled = true;
+				syncResult = result;
+			}
+			else if (window.g_asc_plugins)
+			{
+				window.g_asc_plugins.onPluginMethodReturn(result);
+			}
 		});
+		if (isSettled)
+			return syncResult;
+		isAsync = true;
+		window.g_asc_plugins && window.g_asc_plugins.setPluginMethodReturnAsync();
+		return undefined;
 	};
 	Api.prototype._pluginMethod_PasteHtml = function(htmlText, callback) {
 		if (!AscCommon.g_clipboardBase
 			|| !this.canEdit()
+			|| this.isRefreshInProgress
+			|| (AscCommon.CollaborativeEditing && AscCommon.CollaborativeEditing.Get_GlobalLock && AscCommon.CollaborativeEditing.Get_GlobalLock())
 			|| document.getElementById("pmpastehtml"))
 		{
 			if (callback)
-				callback();
+				callback(false);
 			
 			return null;
 		}
@@ -375,42 +393,117 @@
 		let b_old_save_format = AscCommon.g_clipboardBase.bSaveFormat;
 		AscCommon.g_clipboardBase.bSaveFormat = false;
 		let _t = this;
-		_t.asc_PasteData(AscCommon.c_oAscClipboardDataFormat.HtmlElement, _elem, undefined, undefined, undefined,
-			function()
+		let pasteLoadGeneration = this.documentLoadGeneration || 0;
+		let ownsLongAction = true;
+		let releaseLongAction = function()
+		{
+			if (ownsLongAction)
 			{
+				ownsLongAction = false;
 				_t.decrementCounterLongAction();
-				
-				let fCallback = function()
+			}
+		};
+		let finish = function(success, notifications)
+		{
+			if (!_elem)
+				return false;
+			if (_t._removePendingPluginPasteCancel)
+				_t._removePendingPluginPasteCancel(cancelPaste);
+			else if (_t.cancelPendingPluginPaste === cancelPaste)
+				_t.cancelPendingPluginPaste = null;
+			let elem = _elem;
+			_elem = null;
+			if (elem.parentNode)
+				elem.parentNode.removeChild(elem);
+			else if (document.body && (!document.body.contains || document.body.contains(elem)))
+				document.body.removeChild(elem);
+			AscCommon.g_clipboardBase.bSaveFormat = b_old_save_format;
+			_t.executeGroupActionsEnd();
+			try
+			{
+				releaseLongAction();
+			}
+			finally
+			{
+				if (callback)
 				{
-					document.body.removeChild(_elem);
-					_elem = null;
-					
-					AscCommon.g_clipboardBase.bSaveFormat = b_old_save_format;
-					
-					_t.executeGroupActionsEnd();
-					
-					if (callback)
-						callback();
-					
-					// Update target position after paste
-					if (AscCommon.c_oEditorId.Word === _t.getEditorId())
-					{
-						let logicDocument = _t.private_GetLogicDocument();
-						if (logicDocument && logicDocument.IsDocumentEditor())
-						{
-							logicDocument.GetDrawingDocument().UpdateTargetFromPaint = true;
-							logicDocument.private_UpdateCursorXY(true, true, true);
-							logicDocument.RecalculateCurPos();
-							logicDocument.UpdateSelection();
-						}
-					}
-				};
-				if (_t.checkLongActionCallback(fCallback, null))
-				{
-					fCallback();
+					if (notifications)
+						notifications.push(function() { callback(success); });
+					else
+						callback(success);
 				}
 			}
-		);
+			return true;
+		};
+		let cancelPaste = function(notifications)
+		{
+			finish(false, notifications);
+		};
+		if (this._addPendingPluginPasteCancel)
+			this._addPendingPluginPasteCancel(cancelPaste);
+		else
+			this.cancelPendingPluginPaste = cancelPaste;
+
+		let onPasteReject = function()
+		{
+			finish(false);
+		};
+		try
+		{
+			_t.asc_PasteData(AscCommon.c_oAscClipboardDataFormat.HtmlElement, _elem, undefined, undefined, undefined,
+				function(isSuccess)
+				{
+					if (false === isSuccess)
+					{
+						finish(false);
+						return;
+					}
+					let fCallback = function()
+					{
+						if (!_elem)
+							return;
+						if ((_t.documentLoadGeneration || 0) !== pasteLoadGeneration)
+						{
+							finish(false);
+							return;
+						}
+						finish(true);
+						if ((_t.documentLoadGeneration || 0) !== pasteLoadGeneration)
+							return;
+
+						// Update target position after paste
+						if (AscCommon.c_oEditorId.Word === _t.getEditorId())
+						{
+							let logicDocument = _t.private_GetLogicDocument();
+							if (logicDocument && logicDocument.IsDocumentEditor())
+							{
+								logicDocument.GetDrawingDocument().UpdateTargetFromPaint = true;
+								logicDocument.private_UpdateCursorXY(true, true, true);
+								logicDocument.RecalculateCurPos();
+								logicDocument.UpdateSelection();
+							}
+						}
+					};
+					try
+					{
+						releaseLongAction();
+					}
+					finally
+					{
+						if (_t.checkLongActionCallback(fCallback, null))
+						{
+							fCallback();
+						}
+					}
+				},
+				undefined,
+				onPasteReject
+			);
+		}
+		catch (err)
+		{
+			finish(false);
+		}
 	};
 
     /**
@@ -424,18 +517,64 @@
     {
         if (!AscCommon.g_clipboardBase || !window.g_asc_plugins || !text)
             return null;
+		if (this.isRefreshInProgress || (AscCommon.CollaborativeEditing && AscCommon.CollaborativeEditing.Get_GlobalLock && AscCommon.CollaborativeEditing.Get_GlobalLock()))
+			return false;
 
 		var _t = this;
-		function onPasteAsync() {
-			_t.decrementCounterLongAction();
-			window.g_asc_plugins.onPluginMethodReturn(true);
+		var settled = false;
+		var isAsync = false;
+		var syncResult = false;
+		var pasteLoadGeneration = this.documentLoadGeneration || 0;
+		var finish = function(success, notifications) {
+			if (settled)
+				return;
+			settled = true;
+			if (_t._removePendingPluginPasteCancel)
+				_t._removePendingPluginPasteCancel(cancelPaste);
+			else if (_t.cancelPendingPluginPaste === cancelPaste)
+				_t.cancelPendingPluginPaste = null;
+			try {
+				_t.decrementCounterLongAction();
+			} finally {
+				if (!isAsync && !notifications) {
+					syncResult = success;
+				} else {
+					var notify = function() {
+						window.g_asc_plugins && window.g_asc_plugins.onPluginMethodReturn(success);
+					};
+					if (notifications)
+						notifications.push(notify);
+					else
+						notify();
+				}
+			}
+		};
+		var cancelPaste = function(notifications) {
+			finish(false, notifications);
+		};
+		var onPasteReject = function() {
+			finish(false);
+		};
+		function onPasteAsync(isSuccess) {
+			finish(false !== isSuccess && (_t.documentLoadGeneration || 0) === pasteLoadGeneration);
 		}
 
-		window.g_asc_plugins.setPluginMethodReturnAsync();
+		if (this._addPendingPluginPasteCancel)
+			this._addPendingPluginPasteCancel(cancelPaste);
+		else
+			this.cancelPendingPluginPaste = cancelPaste;
 		this.incrementCounterLongAction();
-		this.executeGroupActions(function(){
-			_t.asc_PasteData(AscCommon.c_oAscClipboardDataFormat.Text, text, undefined, undefined, undefined, onPasteAsync);
-		});
+		try {
+			this.executeGroupActions(function(){
+				_t.asc_PasteData(AscCommon.c_oAscClipboardDataFormat.Text, text, undefined, undefined, undefined, onPasteAsync, undefined, onPasteReject);
+			});
+		} catch (err) {
+			finish(false);
+		}
+		if (settled)
+			return syncResult;
+		isAsync = true;
+		window.g_asc_plugins.setPluginMethodReturnAsync();
 	};
 
     /**
@@ -1280,35 +1419,131 @@
 	 */
     Api.prototype["pluginMethod_ReplaceTextSmart"] = function(arrString, sParaTab, sParaNewLine)
     {
-		window.g_asc_plugins && window.g_asc_plugins.setPluginMethodReturnAsync();
+		if (this.isRefreshInProgress || (AscCommon.CollaborativeEditing && AscCommon.CollaborativeEditing.Get_GlobalLock && AscCommon.CollaborativeEditing.Get_GlobalLock()))
+			return false;
+
 		this.incrementCounterLongAction();
 		let jsApi = this.getJsApi();
+		let _t = this;
+		let replaceLoadGeneration = this.documentLoadGeneration || 0;
+		let isFinished = false;
+		let isAsync = false;
+		let syncResult = false;
+		let ownsLongAction = true;
+		let releaseLongAction = function()
+		{
+			if (ownsLongAction)
+			{
+				ownsLongAction = false;
+				_t.decrementCounterLongAction();
+			}
+		};
+		let notifyResult = function(success, notifications)
+		{
+			if (!isAsync && !notifications)
+			{
+				syncResult = success;
+				return;
+			}
+			if (window.g_asc_plugins)
+			{
+				if (notifications)
+					notifications.push(function() { window.g_asc_plugins && window.g_asc_plugins.onPluginMethodReturn(success); });
+				else
+					window.g_asc_plugins.onPluginMethodReturn(success);
+			}
+		};
+		let cancelReplace = function(notifications)
+		{
+			if (isFinished)
+				return;
+			isFinished = true;
+			if (_t._removePendingPluginPasteCancel)
+				_t._removePendingPluginPasteCancel(cancelReplace);
+			if (AscFonts.FontPickerByCharacter && AscFonts.FontPickerByCharacter.CallbackObj &&
+				AscFonts.FontPickerByCharacter.CallbackObj._callback === ReplaceTextSmart)
+			{
+				AscFonts.FontPickerByCharacter.CallbackObj._this = null;
+				AscFonts.FontPickerByCharacter.CallbackObj._callback = null;
+			}
+			try
+			{
+				releaseLongAction();
+			}
+			finally
+			{
+				notifyResult(false, notifications);
+			}
+		};
 		function ReplaceTextSmart()
 		{
-			this.asc_canPaste();
-			jsApi.ReplaceTextSmart(arrString, sParaTab, sParaNewLine);
-			this.asc_Recalculate(true);
-			switch (this.editorId)
+			if (isFinished)
+				return;
+			if ((this.documentLoadGeneration || 0) !== replaceLoadGeneration
+				|| this.isRefreshInProgress
+				|| (AscCommon.CollaborativeEditing && AscCommon.CollaborativeEditing.Get_GlobalLock && AscCommon.CollaborativeEditing.Get_GlobalLock())
+				|| (this.asc_canPaste && false === this.asc_canPaste()))
 			{
-				case AscCommon.c_oEditorId.Spreadsheet:
-					this.asc_endPaste();
-					break;
-				case AscCommon.c_oEditorId.Word:
-				case AscCommon.c_oEditorId.Presentation:
-					this.WordControl.m_oLogicDocument.FinalizeAction();
-					break;
+				cancelReplace();
+				return;
 			}
-
-			this.decrementCounterLongAction();
-
-			window.g_asc_plugins && window.g_asc_plugins.onPluginMethodReturn(true);
+			isFinished = true;
+			if (_t._removePendingPluginPasteCancel)
+				_t._removePendingPluginPasteCancel(cancelReplace);
+			let succeeded = false;
+			try
+			{
+				jsApi.ReplaceTextSmart(arrString, sParaTab, sParaNewLine);
+				if ((this.documentLoadGeneration || 0) !== replaceLoadGeneration)
+					return;
+				this.asc_Recalculate(true);
+				switch (this.editorId)
+				{
+					case AscCommon.c_oEditorId.Spreadsheet:
+						this.asc_endPaste();
+						break;
+					case AscCommon.c_oEditorId.Word:
+					case AscCommon.c_oEditorId.Presentation:
+						this.WordControl.m_oLogicDocument.FinalizeAction();
+						break;
+				}
+				succeeded = true;
+			}
+			catch (err)
+			{
+				// Reported as false via notifyResult(succeeded) in both sync and async modes.
+			}
+			finally
+			{
+				try
+				{
+					releaseLongAction();
+				}
+				finally
+				{
+					notifyResult(succeeded);
+				}
+			}
 		}
+		if (this._addPendingPluginPasteCancel)
+			this._addPendingPluginPasteCancel(cancelReplace);
 
 		let sOverAll = "";
 		for (let nIndex = 0, nCount = arrString.length; nIndex < nCount; ++nIndex)
 			sOverAll += arrString[nIndex];
 
-		AscFonts.FontPickerByCharacter.checkText(sOverAll, this, ReplaceTextSmart);
+		try
+		{
+			AscFonts.FontPickerByCharacter.checkText(sOverAll, this, ReplaceTextSmart);
+		}
+		catch (err)
+		{
+			cancelReplace();
+		}
+		if (isFinished)
+			return syncResult;
+		isAsync = true;
+		window.g_asc_plugins && window.g_asc_plugins.setPluginMethodReturnAsync();
         return true;
     };
 	/**

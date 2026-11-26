@@ -860,24 +860,32 @@
 	{
 		this.WordControl.m_oLogicDocument.Document_Undo({All : true});
 	};
-	asc_docs_api.prototype.asc_CloseFile            = function()
+	asc_docs_api.prototype.asc_CloseFile            = function(keepServerWaitAction)
 	{
-		History.Clear();
-		g_oIdCounter.Clear();
-		g_oTableId.Clear();
-		AscCommon.CollaborativeEditing.Clear();
-		this.isApplyChangesOnOpenEnabled = true;
-		this.isDocumentLoadComplete = false;
-		this.ServerImagesWaitComplete = false;
-		this.turnOffSpecialModes();
+		var closeBody = function()
+		{
+			this._closeDocumentLoad(keepServerWaitAction);
+			History.Clear();
+			g_oIdCounter.Clear();
+			g_oTableId.Clear();
+			AscCommon.CollaborativeEditing.Clear();
+			this.isApplyChangesOnOpenEnabled = true;
+			this.isDocumentLoadComplete = false;
+			this.ServerImagesWaitComplete = false;
+			this.turnOffSpecialModes();
 
-		var oLogicDocument = this.WordControl.m_oLogicDocument;
-		oLogicDocument.StopRecalculate();
-		oLogicDocument.StopSpellCheck();
-		AscCommon.pptx_content_loader.ImageMapChecker = {};
+			var oLogicDocument = this.WordControl.m_oLogicDocument;
+			oLogicDocument.StopRecalculate();
+			oLogicDocument.StopSpellCheck();
+			AscCommon.pptx_content_loader.ImageMapChecker = {};
 
-		this.WordControl.m_oDrawingDocument.CloseFile();
-		this.sendEvent("asc_onCloseFile");
+			this.WordControl.m_oDrawingDocument.CloseFile();
+			this.sendEvent("asc_onCloseFile");
+		};
+		if (this._runAbortScope)
+			this._runAbortScope(closeBody);
+		else
+			closeBody.call(this);
 	};
 	asc_docs_api.prototype.asc_SetFastCollaborative = function(isOn)
 	{
@@ -2032,21 +2040,25 @@ background-repeat: no-repeat;\
 		return false;
 	};
 
-	asc_docs_api.prototype.asc_PasteData = function(_format, data1, data2, text_data, null_param, callback)
+	asc_docs_api.prototype.asc_PasteData = function(_format, data1, data2, text_data, null_param, callback, checkLocks, rejectCallback)
 	{
-	    if (!this.canEdit())
+	    if (!this.canEdit()
+			|| this.isSlideShow()
+			|| (AscCommon.CollaborativeEditing && AscCommon.CollaborativeEditing.Get_GlobalLock && AscCommon.CollaborativeEditing.Get_GlobalLock())
+			|| !this.WordControl
+			|| !this.WordControl.m_oLogicDocument)
+		{
+			rejectCallback && rejectCallback();
     	    return;
-
-		//slide show
-		if(this.isSlideShow()) {
-			return;
 		}
 
 		if (false === this.WordControl.m_oLogicDocument.Document_Is_SelectionLocked(AscCommon.changestype_Paragraph_Content, null, false)) {
 			this.WordControl.m_oLogicDocument.Create_NewHistoryPoint(AscDFH.historydescription_Document_PasteHotKey);
 
 			window['AscCommon'].g_specialPasteHelper.Paste_Process_Start(arguments[5]);
-			AscCommon.Editor_Paste_Exec(this, _format, data1, data2, text_data, undefined, callback);
+			AscCommon.Editor_Paste_Exec(this, _format, data1, data2, text_data, undefined, callback, rejectCallback);
+		} else if (rejectCallback) {
+			rejectCallback();
 		}
 	};
 
@@ -5663,10 +5675,10 @@ background-repeat: no-repeat;\
 		// here we need to fire event about menu freeze
 		// and display information in status bar
 		if (this.isPasteFonts_Images)
-			this.sync_StartAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadFont);
+			(this.startFontLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadFont);
 		else
 		{
-			this.sync_StartAction(undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
+			(this.startFontLoadAction || this.sync_StartAction).call(this, undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
 
 			// fill progress
 			this.updateOpenDocumentProgress();
@@ -5691,15 +5703,18 @@ background-repeat: no-repeat;\
 	asc_docs_api.prototype.asyncFontsDocumentEndLoaded   = function(blockType)
 	{
 		// fonts are loaded. Now we need to load images
-		if (this.isPasteFonts_Images)
+		if (this.endFontLoadAction)
+			this.endFontLoadAction();
+		else if (this.isPasteFonts_Images)
 			this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadFont);
 		else
 			this.sync_EndAction(undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
 
         if (undefined !== this.asyncMethodCallback)
         {
-            this.asyncMethodCallback();
+            var asyncCb = this.asyncMethodCallback;
             this.asyncMethodCallback = undefined;
+            asyncCb.call(this);
             return;
         }
 
@@ -5713,7 +5728,7 @@ background-repeat: no-repeat;\
 			if (_count > 0)
 			{
 				this.EndActionLoadImages = 2;
-				this.sync_StartAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadImage);
+				(this.startImageLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadImage);
 			}
 
 			this.ImageLoader.LoadDocumentImages(this.pasteImageMap);
@@ -5728,7 +5743,7 @@ background-repeat: no-repeat;\
 			if (_count > 0)
 			{
 				this.EndActionLoadImages = 2;
-				this.sync_StartAction(c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadImage);
+				(this.startImageLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadImage);
 			}
 			const oRequiredSyncImagesMap = this.getRequiredSyncImagesOnLoad();
 			this.ImageLoader.LoadDocumentImages(this.saveImageMap, false, oRequiredSyncImagesMap);
@@ -5755,7 +5770,7 @@ background-repeat: no-repeat;\
 		if (_count > 0)
 		{
 			this.EndActionLoadImages = 1;
-			this.sync_StartAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadDocumentImages);
+			(this.startImageLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadDocumentImages);
 		}
 
 		const oRequiredSyncImagesMap = this.getRequiredSyncImagesOnLoad();
@@ -5777,7 +5792,9 @@ background-repeat: no-repeat;\
 		this.ImageLoader.bIsLoadDocumentFirst = false;
 		var _bIsOldPaste                      = this.isPasteFonts_Images;
 
-		if (this.EndActionLoadImages == 1)
+		if (this.endImageLoadAction)
+			this.endImageLoadAction();
+		else if (this.EndActionLoadImages == 1)
 		{
 			this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadDocumentImages);
 		}
@@ -5794,11 +5811,19 @@ background-repeat: no-repeat;\
 		// unfreeze menu... and start calculating document
 		if (this.isPasteFonts_Images)
 		{
+			var pasteCb = this.pasteCallback;
 			this.isPasteFonts_Images = false;
 			this.pasteImageMap       = null;
-			this.pasteCallback();
-			this.pasteCallback            = null;
-			this.decrementCounterLongAction();
+			this.pasteCancelCallback = null;
+			this.pasteCallback       = null;
+			try
+			{
+				pasteCb && pasteCb.call(this);
+			}
+			finally
+			{
+				this.decrementCounterLongAction();
+			}
 		}
 		else if (this.isSaveFonts_Images)
 		{
@@ -5861,7 +5886,12 @@ background-repeat: no-repeat;\
 						this.isApplyChangesOnOpen = true;
 						this._applyPreOpenLocks();
 						let perfStart = performance.now();
+						let loadGeneration = this.documentLoadGeneration || 0;
 						AscCommon.CollaborativeEditing.Apply_Changes();
+						if ((this.documentLoadGeneration || 0) !== loadGeneration) {
+							this.bNoSendComments = false;
+							return;
+						}
 						let perfEnd = performance.now();
 						if (OtherChanges) {
 							AscCommon.sendClientLog("debug", AscCommon.getClientInfoString("onApplyChanges", perfEnd - perfStart), this);
@@ -5940,7 +5970,10 @@ background-repeat: no-repeat;\
 				this.sync_AddComment(_comments[j].Get_Id(), _comments[j].Data);
 			}
 		}
+		var readyLoadGeneration = this.documentLoadGeneration || 0;
 		this.onDocumentContentReady();
+		if ((this.documentLoadGeneration || 0) !== readyLoadGeneration)
+			return;
 
 		if(this.asc_IsStartDemonstrationOnOpen())
 		{
@@ -6204,7 +6237,7 @@ background-repeat: no-repeat;\
 		return this.WordControl.m_oLogicDocument.GetHeightEMU();
 	};
 
-	asc_docs_api.prototype.pre_Paste = function(_fonts, _images, callback)
+	asc_docs_api.prototype.pre_Paste = function(_fonts, _images, callback, onCancel)
 	{
 		if (undefined !== window["native"] && undefined !== window["native"]["GetImageUrl"])
 		{
@@ -6218,6 +6251,7 @@ background-repeat: no-repeat;\
 			return;
 		}
 		this.pasteCallback = callback;
+		this.pasteCancelCallback = onCancel || null;
 		this.pasteImageMap = _images;
 
 		var _count = 0;
@@ -6229,8 +6263,11 @@ background-repeat: no-repeat;\
 		{
 			// no events. nothing needs to be loaded. done for Safari on macOS.
 			// there, during LongActions focus is lost and spaces are inserted
-			this.pasteCallback();
-			this.pasteCallback            = null;
+			var pasteCb = this.pasteCallback;
+			this.pasteImageMap       = null;
+			this.pasteCancelCallback = null;
+			this.pasteCallback       = null;
+			pasteCb && pasteCb.call(this);
 			return;
 		}
 
@@ -6241,17 +6278,24 @@ background-repeat: no-repeat;\
 
 	asc_docs_api.prototype.pre_SaveCallback = function()
 	{
+		var loadGeneration = this.documentLoadGeneration || 0;
 		AscCommon.CollaborativeEditing.OnEnd_Load_Objects();
+		if ((this.documentLoadGeneration || 0) !== loadGeneration)
+			return;
 
 		if (this.isApplyChangesOnOpen)
 		{
 			this.isApplyChangesOnOpen = false;
 			this._openDocumentEndCallback();
+			if ((this.documentLoadGeneration || 0) !== loadGeneration)
+				return;
 		}
 		if (this.isApplyChangesOnVersionHistory)
 		{
 			this.isApplyChangesOnVersionHistory = false;
 			this._openVersionHistoryEndCallback();
+			if ((this.documentLoadGeneration || 0) !== loadGeneration)
+				return;
 		}
 
 		this.WordControl.SlideDrawer.CheckRecalculateSlide();
@@ -7354,6 +7398,21 @@ background-repeat: no-repeat;\
 	asc_docs_api.prototype.StartLoadTheme = function()
 	{
 	};
+	asc_docs_api.prototype.cancelLoadTheme = function(notifications)
+	{
+		AscCommon.CollaborativeEditing.Set_GlobalLock(false);
+		this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadTheme);
+		if (this._pluginApplyThemeCallback) {
+			var pluginCallback = this._pluginApplyThemeCallback;
+			this._pluginApplyThemeCallback = null;
+			if (notifications) {
+				notifications.push(pluginCallback);
+			} else {
+				pluginCallback();
+			}
+		}
+	};
+
 	asc_docs_api.prototype.EndLoadTheme   = function(theme_load_info)
 	{
 		AscCommon.CollaborativeEditing.Set_GlobalLock(false);
@@ -7369,8 +7428,9 @@ background-repeat: no-repeat;\
 		this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadTheme);
 
 		if (this._pluginApplyThemeCallback) {
-			this._pluginApplyThemeCallback();
+			var themeCb = this._pluginApplyThemeCallback;
 			this._pluginApplyThemeCallback = null;
+			themeCb.call(this);
 		}
 	};
 

@@ -71,6 +71,8 @@
 
         this.check_loaded_timer_id = -1;
         this.endLoadingCallback = null;
+        this.documentLoadSessionId = 0;
+        this._activeApiLoadGeneration = 0;
 		
 		// Counter for font loading via the LoadFonts method
 		this.loadFontsCounter = 0;
@@ -126,10 +128,47 @@
             return (this.check_loaded_timer_id !== -1) ? true : false;
         };
 
+        this.startDocumentLoad = function()
+        {
+            ++this.documentLoadSessionId;
+            this._activeApiLoadGeneration = this.Api ? (this.Api.documentLoadGeneration || 0) : 0;
+            this.fonts_loading = [];
+        };
+
+        this.endCallbackFontAction = function(api, blockType)
+        {
+            if (api)
+                api.sync_EndAction(undefined === blockType ? Asc.c_oAscAsyncActionType.BlockInteraction : blockType, Asc.c_oAscAsyncAction.LoadDocumentFonts);
+        };
+
+        this.cancelDocumentLoad = function()
+        {
+            if (null != this.ThemeLoader)
+                return;
+
+            let endCallback = this.endLoadingCallback;
+            let blockType = this.BlockOperationType;
+            ++this.documentLoadSessionId;
+            clearTimeout(this.check_loaded_timer_id);
+            this.check_loaded_timer_id = -1;
+            this.fonts_loading = [];
+            this.endLoadingCallback = null;
+            this.BlockOperationType = undefined;
+            this.bIsLoadDocumentFirst = false;
+            this.perfStart = 0;
+            if (null != endCallback)
+                this.endCallbackFontAction(this.Api, blockType);
+        };
+
         this.LoadDocumentFonts = function(fonts)
         {
+            if (this.check_loaded_timer_id !== -1 || null != this.endLoadingCallback)
+                this.cancelDocumentLoad();
             if (this.IsLoadDocumentFonts2)
                 return this.LoadDocumentFonts2(fonts);
+
+            this.startDocumentLoad();
+            let sessionId = this.documentLoadSessionId;
 
             let gui_fonts = [];
             let gui_count = 0;
@@ -147,6 +186,8 @@
             }
 
             this.Api.sync_InitEditorFonts(gui_fonts);
+            if (sessionId !== this.documentLoadSessionId)
+                return;
 
             // But only if it's an editor!!!
             if (this.Api.IsNeedDefaultFonts())
@@ -161,6 +202,8 @@
 
 			this.BlockOperationType = undefined;
             this.Api.asyncFontsDocumentStartLoaded();
+            if (sessionId !== this.documentLoadSessionId)
+                return;
 
             this.bIsLoadDocumentFirst = true;
 
@@ -176,6 +219,8 @@
                 return;
             }
 
+            this.startDocumentLoad();
+            let sessionId = this.documentLoadSessionId;
             this.endLoadingCallback = (undefined !== callback) ? callback : null;
             this.BlockOperationType = blockType;
 
@@ -183,10 +228,15 @@
             for (var i in fonts)
                 this.AddLoadFonts(fonts[i].name, 0x0F);
 
-            if (null == this.ThemeLoader)
-                this.Api.asyncFontsDocumentStartLoaded(this.BlockOperationType);
-            else
+            if (null != this.ThemeLoader)
                 this.ThemeLoader.asyncFontsStartLoaded();
+            else if (null != this.endLoadingCallback)
+                this.Api.sync_StartAction(undefined === blockType ? Asc.c_oAscAsyncActionType.BlockInteraction : blockType, Asc.c_oAscAsyncAction.LoadDocumentFonts);
+            else
+                this.Api.asyncFontsDocumentStartLoaded(blockType);
+
+            if (sessionId !== this.documentLoadSessionId)
+                return;
 
             this.CheckFontsNeedLoadingLoad();
             this._LoadFonts();
@@ -206,72 +256,67 @@
                     this.perfStart = 0;
                 }
 
-                if (null != this.endLoadingCallback)
-                {
-                    this.Api.sync_EndAction(undefined === this.BlockOperationType ? Asc.c_oAscAsyncActionType.BlockInteraction : this.BlockOperationType, Asc.c_oAscAsyncAction.LoadDocumentFonts);
-                    this.endLoadingCallback.call(this.Api);
-                    this.endLoadingCallback = null;
-                }
-                else if (null == this.ThemeLoader)
-                    this.Api.asyncFontsDocumentEndLoaded(this.BlockOperationType);
-                else
-                    this.ThemeLoader.asyncFontsEndLoaded();
-
+                let endCallback = this.endLoadingCallback;
+                let blockType = this.BlockOperationType;
+                let themeLoader = this.ThemeLoader;
+                let api = this.Api;
+                let apiGeneration = this._activeApiLoadGeneration;
+                this.endLoadingCallback = null;
                 this.BlockOperationType = undefined;
                 this.bIsLoadDocumentFirst = false;
+
+                if (themeLoader)
+                {
+                    if (null != endCallback)
+                        endCallback.call(api);
+                    else
+                        themeLoader.asyncFontsEndLoaded();
+                }
+                else if (null != endCallback)
+                {
+                    this.endCallbackFontAction(api, blockType);
+                    if (!api || (api.documentLoadGeneration || 0) === apiGeneration)
+                        endCallback.call(api);
+                }
+                else if (api && (api.documentLoadGeneration || 0) === apiGeneration)
+                    api.asyncFontsDocumentEndLoaded(blockType);
+
                 return;
             }
 
+            let sessionId = this.documentLoadSessionId;
             if (this.fonts_loading[0].CheckFontLoadStyles(this))
             {
                 let _t = this;
                 this.check_loaded_timer_id = setTimeout(function(){
-                    _t.check_loaded_list();
+                    _t.check_loaded_list(sessionId);
                 }, 50);
             }
             else
             {
+                this.fonts_loading.shift();
                 if (this.bIsLoadDocumentFirst === true)
                 {
                     this.Api.OpenDocumentProgress.CurrentFont++;
                     this.Api.SendOpenProgress();
                 }
 
-                this.fonts_loading.shift();
-                this._LoadFonts();
+                if (sessionId === this.documentLoadSessionId)
+                    this._LoadFonts();
             }
         };
 
-        this.check_loaded_list = function()
+        this.check_loaded_list = function(expectedSessionId)
         {
+            if (expectedSessionId !== this.documentLoadSessionId)
+                return;
             this.check_loaded_timer_id = -1;
-            if (0 === this.fonts_loading.length)
+            if (null == this.ThemeLoader && this.Api && (this.Api.documentLoadGeneration || 0) !== this._activeApiLoadGeneration)
             {
-                // Means it was deleted asynchronously
-                this._LoadFonts();
+                this.cancelDocumentLoad();
                 return;
             }
-
-            let current = this.fonts_loading[0];
-            let isNeed = current.CheckFontLoadStyles(this);
-            if (true === isNeed)
-            {
-                let _t = this;
-                this.check_loaded_timer_id = setTimeout(function(){
-                    _t.check_loaded_list();
-                }, 50);
-            }
-            else
-            {
-                if (this.bIsLoadDocumentFirst === true)
-                {
-                    this.Api.OpenDocumentProgress.CurrentFont++;
-                    this.Api.SendOpenProgress();
-                }
-
-                this.fonts_loading.shift();
-                this._LoadFonts();
-            }
+            this._LoadFonts();
         };
 
         // Single font loading
@@ -404,6 +449,16 @@
 
         this.bIsLoadDocumentFirst = false;
         this.bIsAsyncLoadDocumentImages = false;
+        this.documentImagesLoadId = 0;
+
+        this.cancelDocumentLoad = function()
+        {
+            if (null == this.ThemeLoader)
+            {
+                ++this.documentImagesLoadId;
+                this.bIsLoadDocumentFirst = false;
+            }
+        };
 
         this.isBlockchainSupport = false;
         var oThis = this;
@@ -510,19 +565,33 @@
 		    }
 	    };
 
-	    this._LoadImages = function (arrImages) {
+	    this._LoadImages = function (arrImages, arrAsyncImages) {
+		    const themeLoader = this.ThemeLoader;
+		    const themeSessionId = themeLoader ? themeLoader.loadSessionId : null;
+		    const loadId = this.documentImagesLoadId;
+		    const loadGeneration = this.Api ? (this.Api.documentLoadGeneration || 0) : 0;
+		    const isCurrent = () => oThis.isCurrentDocumentImageLoad(loadId, loadGeneration) &&
+			    (!themeLoader || (oThis.ThemeLoader === themeLoader && themeLoader.loadSessionId === themeSessionId));
 		    let fOnEachImageLoadCallback;
 		    if (oThis.bIsLoadDocumentFirst === true) {
 			    fOnEachImageLoadCallback = function () {
-				    oThis.Api.OpenDocumentProgress.CurrentImage++;
-				    oThis.Api.SendOpenProgress();
+				    if (isCurrent()) {
+					    oThis.Api.OpenDocumentProgress.CurrentImage++;
+					    oThis.Api.SendOpenProgress();
+				    }
 			    };
 		    }
 		    this.LoadImagesWithCallback(arrImages, function () {
-			    if (oThis.ThemeLoader == null)
+			    if (!isCurrent())
+				    return;
+			    if (arrAsyncImages) {
+				    for (let i = 0; i < arrAsyncImages.length; i++)
+					    oThis.LoadImageAsync(arrAsyncImages[i]);
+			    }
+			    if (themeLoader == null)
 				    oThis.Api.asyncImagesDocumentEndLoaded();
 			    else
-				    oThis.ThemeLoader.asyncImagesEndLoaded();
+				    themeLoader.asyncImagesEndLoaded();
 		    }, [], false, fOnEachImageLoadCallback);
 	    };
 
@@ -536,24 +605,14 @@
 				    arrAsyncImages.push(arrImages[i]);
 			    }
 		    }
-		    let fOnEachImageLoadCallback;
-		    if (oThis.bIsLoadDocumentFirst === true) {
-			    fOnEachImageLoadCallback = function () {
-				    oThis.Api.OpenDocumentProgress.CurrentImage++;
-				    oThis.Api.SendOpenProgress();
-			    };
-		    }
-		    this.LoadImagesWithCallback(arrSyncImages, function () {
-			    for (let i = 0; i < arrAsyncImages.length; i += 1) {
-				    oThis.LoadImageAsync(arrAsyncImages[i]);
-			    }
-
-			    if (oThis.ThemeLoader == null)
-				    oThis.Api.asyncImagesDocumentEndLoaded();
-			    else
-				    oThis.ThemeLoader.asyncImagesEndLoaded();
-		    }, [], false, fOnEachImageLoadCallback);
+		    this._LoadImages(arrSyncImages, arrAsyncImages);
 	    };
+
+        this.isCurrentDocumentImageLoad = function(loadId, loadGeneration)
+        {
+            return loadId === this.documentImagesLoadId &&
+                (!this.Api || (this.Api.documentLoadGeneration || 0) === loadGeneration);
+        };
 
         this.LoadImage = function(src, type)
         {

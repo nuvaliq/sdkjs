@@ -1017,10 +1017,12 @@ var editor;
 	return AscCommon.g_clipboardBase.Button_Cut();
   };
 
-  spreadsheet_api.prototype.asc_PasteData = function (_format, data1, data2, text_data, doNotShowButton, callback) {
-    if (this.canEdit()) {
+  spreadsheet_api.prototype.asc_PasteData = function (_format, data1, data2, text_data, doNotShowButton, callback, checkLocks, rejectCallback) {
+    if (this.canEdit() && this.wb && (!this.wb.getWorksheet || this.wb.getWorksheet()) && !(this.collaborativeEditing && this.collaborativeEditing.getGlobalLock && this.collaborativeEditing.getGlobalLock())) {
       this.wb.pasteData(_format, data1, data2, text_data, doNotShowButton, callback);
       //this.asc_EndMoveSheet2(data1, 1, "test2");
+    } else if (rejectCallback) {
+      rejectCallback();
     }
   };
 
@@ -1806,15 +1808,19 @@ var editor;
     this.OpenDocumentProgress.Type = c_oAscAsyncAction.LoadDocumentFonts;
     this.OpenDocumentProgress.FontsCount = this.FontLoader.fonts_loading.length;
     this.OpenDocumentProgress.CurrentFont = 0;
-    this.sync_StartAction(undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
+    (this.startFontLoadAction || this.sync_StartAction).call(this, undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
   };
 
   spreadsheet_api.prototype.asyncFontsDocumentEndLoaded = function(blockType) {
-    this.sync_EndAction(undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
+    if (this.endFontLoadAction)
+      this.endFontLoadAction();
+    else
+      this.sync_EndAction(undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
 
     if (this.asyncMethodCallback !== undefined) {
-      this.asyncMethodCallback();
+      var asyncCb = this.asyncMethodCallback;
       this.asyncMethodCallback = undefined;
+      asyncCb.call(this);
     } else {
       // Fonts loaded, possibly need to wait for collaborative editing
       this.FontLoadWaitComplete = true;
@@ -1862,40 +1868,96 @@ var editor;
 	AscCommon.sendClientLog("debug", AscCommon.getClientInfoString("onOpenDocument", perfEnd - perfStart), this);
   };
 
-	spreadsheet_api.prototype.asc_CloseFile = function () {
-		History.Clear();
-		g_oIdCounter.Clear();
-		g_oTableId.Clear();
-		AscCommonExcel.resetDrawingContextFonts();
-		AscCommonExcel.g_StyleCache.Clear();
-		AscCommon.CollaborativeEditing.Clear();
-		AscCommon.g_oDocumentUrls.Clear();
-		this.isApplyChangesOnOpenEnabled = true;
-		this.isDocumentLoadComplete = false;
-		this.FontLoadWaitComplete = false;
-        this.turnOffSpecialModes();
-
-		//removing all handlersList added during wbView initialization
-		//because the old one cannot be used when opening (in version history case, when reopening a file, old functions from previous workbookview remain there)
-		//ideally should nullify it completely and recreate when opening. but there are functions that
-		//are added in the interface and in version history case are not added again
-		this.wb.removeHandlersList();
-		if (this.frameManager.isFrameEditor()) {
-			this.wb.removeEventListeners();
-			var cellEditor = this.wb.cellEditor;
-			if (this.wb.cellEditor) {
-				cellEditor.removeEventListeners();
+	spreadsheet_api.prototype._abortPendingDocumentLoad = function(clearPartialDocumentState) {
+		var abortBody = function() {
+			if (this.asyncMethodCallback && this.wbModel && this.wbModel.bCollaborativeChanges) {
+				this.wbModel.bCollaborativeChanges = false;
+				AscCommonExcel.oFormulaLocaleInfo.Parse = true;
+				AscCommonExcel.oFormulaLocaleInfo.DigitSep = true;
+				History.TurnOn();
 			}
-		}
+			if (clearPartialDocumentState && !this.isDocumentLoadComplete) {
+				var hadPendingWorkbookView = Boolean(this._hasPendingWorkbookView);
+				if (hadPendingWorkbookView) {
+					this._hasPendingWorkbookView = false;
+					if (this.wb) {
+						if (this.wb.removeHandlersList) {
+							this.wb.removeHandlersList();
+						}
+						if (this.frameManager && this.frameManager.isFrameEditor && this.frameManager.isFrameEditor()) {
+							if (this.wb.removeEventListeners) {
+								this.wb.removeEventListeners();
+							}
+							if (this.wb.cellEditor && this.wb.cellEditor.removeEventListeners) {
+								this.wb.cellEditor.removeEventListeners();
+							}
+						}
+						if (this.wb.MobileTouchManager && this.wb.MobileTouchManager.Destroy) {
+							this.wb.MobileTouchManager.Destroy();
+						}
+					}
+				}
+				if (this._hasPendingWorkbookModel || hadPendingWorkbookView) {
+					this._hasPendingWorkbookModel = false;
+					if (this.wbModel && this.wbModel.DrawingDocument && this.wbModel.DrawingDocument.CloseFile) {
+						this.wbModel.DrawingDocument.CloseFile();
+					}
+					if (AscCommonExcel && AscCommonExcel.g_StyleCache && AscCommonExcel.g_StyleCache.Clear) {
+						AscCommonExcel.g_StyleCache.Clear();
+					}
+				}
+			}
+			AscCommon.baseEditorsApi.prototype._abortPendingDocumentLoad.call(this, clearPartialDocumentState);
+		};
+		if (this._runAbortScope)
+			this._runAbortScope(abortBody);
+		else
+			abortBody.call(this);
+	};
 
-		if (this.wbModel.DrawingDocument) {
-			this.wbModel.DrawingDocument.CloseFile();
-		}
+	spreadsheet_api.prototype.asc_CloseFile = function (keepServerWaitAction) {
+		var closeBody = function () {
+			this._hasPendingWorkbookView = false;
+			this._hasPendingWorkbookModel = false;
+			this._closeDocumentLoad(keepServerWaitAction);
+			History.Clear();
+			g_oIdCounter.Clear();
+			g_oTableId.Clear();
+			AscCommonExcel.resetDrawingContextFonts();
+			AscCommonExcel.g_StyleCache.Clear();
+			AscCommon.CollaborativeEditing.Clear();
+			AscCommon.g_oDocumentUrls.Clear();
+			this.isApplyChangesOnOpenEnabled = true;
+			this.isDocumentLoadComplete = false;
+			this.FontLoadWaitComplete = false;
+			this.turnOffSpecialModes();
 
-		if (this.wb.MobileTouchManager) {
-			this.wb.MobileTouchManager.Destroy();
-		}
-		this.sendEvent("asc_onCloseFile");
+			//removing all handlersList added during wbView initialization
+			//because the old one cannot be used when opening (in version history case, when reopening a file, old functions from previous workbookview remain there)
+			//ideally should nullify it completely and recreate when opening. but there are functions that
+			//are added in the interface and in version history case are not added again
+			this.wb.removeHandlersList();
+			if (this.frameManager.isFrameEditor()) {
+				this.wb.removeEventListeners();
+				var cellEditor = this.wb.cellEditor;
+				if (this.wb.cellEditor) {
+					cellEditor.removeEventListeners();
+				}
+			}
+
+			if (this.wbModel.DrawingDocument) {
+				this.wbModel.DrawingDocument.CloseFile();
+			}
+
+			if (this.wb.MobileTouchManager) {
+				this.wb.MobileTouchManager.Destroy();
+			}
+			this.sendEvent("asc_onCloseFile");
+		};
+		if (this._runAbortScope)
+			this._runAbortScope(closeBody);
+		else
+			closeBody.call(this);
 	};
 
 	spreadsheet_api.prototype.OpenDocumentFromBinNoInit = function(gObject)
@@ -1909,6 +1971,7 @@ var editor;
 	spreadsheet_api.prototype.OpenDocumentFromBin = function(url, gObject)
 	{
 		this.wbModel = new AscCommonExcel.Workbook(this.handlers, this, true);
+		this._hasPendingWorkbookModel = true;
 		this.initGlobalObjects(this.wbModel, gObject.length);
 		this.OpenDocumentFromBinNoInit(gObject);
 		this._onEndOpen();
@@ -2015,6 +2078,7 @@ var editor;
 
 	spreadsheet_api.prototype.OpenDocumentFromZip = function (data, backgroundOpen) {
 		this.wbModel = new AscCommonExcel.Workbook(this.handlers, this, true);
+		this._hasPendingWorkbookModel = true;
 		this.initGlobalObjects(this.wbModel, data.length);
 		let reader = this.OpenDocumentFromZipNoInit(data, backgroundOpen);
 		this._onEndOpen();
@@ -2701,9 +2765,19 @@ var editor;
     if (this.isDocumentLoadComplete) {
       return;
     }
+    var loadGeneration = this.documentLoadGeneration || 0;
     if (this.collaborativeEditing.applyChanges()) {
+      if ((this.documentLoadGeneration || 0) !== loadGeneration) {
+        return;
+      }
       // No changes
       this.onDocumentContentReady();
+      if ((this.documentLoadGeneration || 0) !== loadGeneration) {
+        return;
+      }
+    }
+    if ((this.documentLoadGeneration || 0) !== loadGeneration) {
+      return;
     }
     // Forward our changes (just clear others' locks, since we have no changes)
     this.collaborativeEditing.sendChanges();
@@ -3097,7 +3171,11 @@ var editor;
 	  let perfStart = performance.now();
 	  let callback = fCallback;
 	  if (!this.isDocumentLoadComplete) {
+		  let loadGeneration = this.documentLoadGeneration || 0;
 		  callback = function() {
+			  if ((t.documentLoadGeneration || 0) !== loadGeneration) {
+				  return;
+			  }
 			  let perfEnd = performance.now();
 			  AscCommon.sendClientLog("debug", AscCommon.getClientInfoString("onApplyChanges", perfEnd - perfStart), t);
 			  fCallback();
@@ -3135,6 +3213,8 @@ var editor;
   };
 
   spreadsheet_api.prototype.onDocumentContentReady = function() {
+    this._hasPendingWorkbookView = false;
+    this._hasPendingWorkbookModel = false;
     AscCommon.baseEditorsApi.prototype.onDocumentContentReady.call(this);
 
 	if (window["AscDesktopEditor"] && window["AscDesktopEditor"]["onFileLockedClose"]) {
@@ -3381,6 +3461,12 @@ var editor;
         }
 
 		if (0 === this.wbModel.getWorksheetCount()) {
+			if (this.endOpenAction)
+				this.endOpenAction();
+			if (this.endDisconnectAction)
+				this.endDisconnectAction();
+			if (!this.isDocumentLoadComplete && this._finishPluginQueuePause)
+				this._finishPluginQueuePause(false);
 			this.sendEvent("asc_onError", c_oAscError.ID.ConvertationOpenError, c_oAscError.Level.Critical);
 			return;
         }
@@ -3424,6 +3510,7 @@ var editor;
 
 		this.wb = new AscCommonExcel.WorkbookView(this.wbModel, this.controller, this.handlers, this.HtmlElement,
 			this.topLineEditorElement, this, this.collaborativeEditing, this.fontRenderingMode);
+		this._hasPendingWorkbookView = true;
 
 		this.registerCustomFunctionsLibrary(undefined, true);
 
@@ -3472,9 +3559,16 @@ var editor;
 		this.sendStandartTextures();
 		this.sendMathToMenu();
 
+		var loadGeneration = this.documentLoadGeneration || 0;
 		// Apply changes received at opening
 		this._applyFirstLoadChanges();
+		if ((this.documentLoadGeneration || 0) !== loadGeneration) {
+			return;
+		}
 		this._applyPreOpenLocks();
+		if ((this.documentLoadGeneration || 0) !== loadGeneration) {
+			return;
+		}
 		// Go to if sent options
 		this.goTo();
 

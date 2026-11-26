@@ -109,6 +109,8 @@
 		this.LongActionCallbacksParams = [];
 		this.IsActionRestrictionCurrent  = 0;
 		this.IsActionRestrictionPrev  = null;
+		this.isDisconnectActionActive = false;
+		this.waitNotIdleTimeout       = null;
 		
 		this.initGroupActions();
 
@@ -160,6 +162,17 @@
 		this.isOnLoadLicense     = false;
 		// Variable indicating whether we sent document open completion
 		this.isDocumentLoadComplete = false;
+		this.documentLoadGeneration = 0;
+		this.wopiRefreshRequestId = 0;
+		this.activeFontLoadAction = null;
+		this.activeImageLoadAction = null;
+		this.isApplyChangesActionActive = false;
+		this.openSilentModeDocument = null;
+		this.isOpenActionActive = false;
+		this.isRefreshInProgress = false;
+		this.isAbortingDocumentLoad = false;
+		this.isPluginQueuePausedForRefresh = false;
+		this._activeAbortNotifications = null;
 		// Variable that indicates whether we've sent the document open completion notification
 		this.isPreOpenLocks = true;
 		this.isApplyChangesOnOpenEnabled = true;
@@ -1412,14 +1425,21 @@
 		//todo auth on connection
 		this.CoAuthoringApi.auth(this.getViewMode(), this._getOpenCmd());
 
-		if (!isRepeat) {
+		if (!isRepeat && !this.isOpenActionActive) {
+			this.isOpenActionActive = true;
 			this.sync_StartAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.Open);
 		}
 
         if (this.DocInfo.get_Encrypted() && window["AscDesktopEditor"] && !window["AscDesktopEditor"]["IsLocalFile"](true))
         {
-        	var t = this;
-            window["AscDesktopEditor"]["OpenFileCrypt"](this.DocInfo.get_Title(), this.DocInfo.get_Url(), function () {t.openFileCryptCallback.apply(t, arguments);});
+            var t = this;
+            var loadGeneration = this.documentLoadGeneration || 0;
+            window["AscDesktopEditor"]["OpenFileCrypt"](this.DocInfo.get_Title(), this.DocInfo.get_Url(), function () {
+                if ((t.documentLoadGeneration || 0) !== loadGeneration) {
+                    return;
+                }
+                t.openFileCryptCallback.apply(t, arguments);
+            });
         }
 	};
 	baseEditorsApi.prototype._openChartOrLocalDocument           = function()
@@ -1443,13 +1463,20 @@
 	baseEditorsApi.prototype._onOpenCommand                      = function(data)
 	{
 		var t = this;
+		var loadGeneration = this.documentLoadGeneration || 0;
 		let perfStart = performance.now();
 		AscCommon.openFileCommand(this.documentId, data, this.documentUrlChanges, this.documentTokenChanges, AscCommon.c_oSerFormat.Signature, function(error, result)
 		{
+			if ((t.documentLoadGeneration || 0) !== loadGeneration)
+			{
+				return;
+			}
 			let perfEnd = performance.now();
 			AscCommon.sendClientLog("debug", AscCommon.getClientInfoString("onDownloadFile", perfEnd - perfStart), t);
 			if (c_oAscError.ID.No !== error)
 			{
+				if (!t.isDocumentLoadComplete)
+					t._finishPluginQueuePause(false);
 				t.sendEvent("asc_onError", error, c_oAscError.Level.Critical);
 				return;
 			}
@@ -1467,6 +1494,8 @@
 
 		if (stream == null)
 		{
+			if (!this.isDocumentLoadComplete)
+				this._finishPluginQueuePause(false);
 			this.sendEvent("asc_onError", c_oAscError.ID.ConvertationOpenError, c_oAscError.Level.Critical);
 			return;
 		}
@@ -1485,10 +1514,8 @@
 		this.setOpenedAt(openedAt);
 		// Connected to server, possibly need to wait for fonts to load
 		this.ServerIdWaitComplete = true;
-		if (this.ServerIdWaitAction) {
-			this.sync_EndAction.apply(this, this.ServerIdWaitAction);
-			this.ServerIdWaitAction = null;
-		}
+		this.isRefreshInProgress = false;
+		this.endServerIdWaitAction();
 		this._openDocumentEndCallback();
 	};
 	baseEditorsApi.prototype.asyncFontStartLoaded                = function()
@@ -1508,10 +1535,12 @@
 	baseEditorsApi.prototype.onDocumentContentReady              = function()
 	{
 		var t = this;
+		var readyGeneration = this.documentLoadGeneration || 0;
 		this.isDocumentLoadComplete = true;
 		if (!window['IS_NATIVE_EDITOR']) {
 			setInterval(function() {t._autoSave();}, 40);
 		}
+		this.isOpenActionActive = false;
 		this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.Open);
 		this.sendEvent('asc_onDocumentContentReady');
 
@@ -1533,6 +1562,9 @@
 		// now at startup cannot delete selection binary - it may be useful in nativeViewer
 		if (!this.disableRemoveFonts)
 			delete window["g_fonts_selection_bin"];
+
+		if ((this.documentLoadGeneration || 0) === readyGeneration && !this.isRefreshInProgress)
+			this._finishPluginQueuePause(true);
 	};
 	// Save
 	baseEditorsApi.prototype.processSavedFile                    = function(url, downloadType, filetype)
@@ -1939,7 +1971,10 @@
 			t.sendEvent('asc_onCoAuthoringChatReceiveMessage', e, clear);
 		};
 		this.CoAuthoringApi.onServerVersion = function (buildVersion, buildNumber) {
-			t.sync_EndAction(Asc.c_oAscAsyncActionType.Information, Asc.c_oAscAsyncAction.Disconnect, Asc.c_oAscRestrictionType.View);
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
+			t.endDisconnectAction();
 
 			t.sendEvent('asc_onServerVersion', buildVersion, buildNumber);
 		};
@@ -1962,10 +1997,17 @@
 		};
 		this.CoAuthoringApi.onFirstLoadChangesEnd     = function(openedAt)
 		{
+			if (this !== t.CoAuthoringApi || t._ignoreCurrentConnectionLoadEvents) {
+				return;
+			}
+			t.endDisconnectAction();
 			t.asyncServerIdEndLoaded(openedAt);
 		};
 		this.CoAuthoringApi.onFirstConnect            = function()
 		{
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			if (!t.isOnLoadLicense) {
 				t._onEndPermissions();
 			} else {
@@ -1980,12 +2022,18 @@
 		};
 		this.CoAuthoringApi.onLicense                 = function(res)
 		{
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			t.licenseResult   = res;
 			t.isOnLoadLicense = true;
 			t._onEndPermissions();
 		};
 		this.CoAuthoringApi.onLicenseChanged          = function(res)
 		{
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			if (res['settings']) {
 				if (res['settings']['maxChangesSize']) {
 					t.maxChangesSize = res['settings']['maxChangesSize'];
@@ -2026,11 +2074,17 @@
 		};
 		this.CoAuthoringApi.onWarning                 = function(code)
 		{
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			const error = undefined !== code ? AscCommon.mapAscServerErrorToAscError(code) : c_oAscError.ID.Warning;
 			t.sendEvent('asc_onError', error, c_oAscError.Level.NoCritical);
 		};
 		this.CoAuthoringApi.onMeta                    = function(data)
 		{
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			var newDocumentTitle = data["title"];
 			if (newDocumentTitle) {
 				t.documentTitle = newDocumentTitle;
@@ -2041,6 +2095,9 @@
 			t.sendEvent('asc_onMeta', data);
 		};
 		this.CoAuthoringApi.onSession = function(data) {
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			var code = data["code"];
 			var reason = data["reason"];
 			var interval = data["interval"];
@@ -2061,6 +2118,9 @@
 			}
 		};
         this.CoAuthoringApi.onForceSave = function(data) {
+            if (this !== t.CoAuthoringApi) {
+                return;
+            }
             if (AscCommon.c_oAscForceSaveTypes.Button === data.type) {
                 if (data.start) {
                     if (null === t.forceSaveButtonTimeout && !t.forceSaveButtonContinue) {
@@ -2125,7 +2185,15 @@
             }
         };
 		this.CoAuthoringApi.onExpiredToken = function(data) {
-			t.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.Open);
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
+			t.endOpenAction();
+			t.endDisconnectAction();
+			t.isRefreshInProgress = false;
+			t.wopiRefreshRequestId = (t.wopiRefreshRequestId || 0) + 1;
+			t.endServerIdWaitAction();
+			t._finishPluginQueuePause(Boolean(t.isDocumentLoadComplete));
 			if (t.VersionHistory && t.VersionHistory.isRequested) {
 				var error = AscCommon.getDisconnectErrorCode(t.isDocumentLoadComplete, data["code"]);
 				var level = t.isDocumentLoadComplete ? Asc.c_oAscError.Level.NoCritical : Asc.c_oAscError.Level.Critical;
@@ -2157,39 +2225,69 @@
 		 */
 		this.CoAuthoringApi.onDisconnect = function(e, opt_closeCode)
 		{
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			if (AscCommon.c_oCloseCode.quiet === opt_closeCode) {
 				return;
 			}
+			let refreshWaitAction = (t.ServerIdWaitAction && t.ServerIdWaitAction[1] === Asc.c_oAscAsyncAction.RefreshFile) ? t.ServerIdWaitAction : null;
+			let isSessionIdleDisconnect = AscCommon.c_oCloseCode.sessionIdle === opt_closeCode;
+			let allowRefresh = [c_oCloseCode.updateVersion, c_oCloseCode.noCache, c_oCloseCode.restore, c_oCloseCode.quiet];
+			let willRefresh = null != opt_closeCode && !isSessionIdleDisconnect &&
+				-1 !== allowRefresh.indexOf(opt_closeCode) && !t.isDocumentModified() && t.canRefreshFile();
+			let endRefreshWait = false;
 			if (!t.ServerIdWaitComplete && AscCommon.ConnectionState.ClosedAll === t.CoAuthoringApi.get_state())
 			{
-				t.asyncServerIdEndLoaded();
+				if (refreshWaitAction) {
+					endRefreshWait = true;
+				} else if (!willRefresh && !t.isRefreshInProgress) {
+					t.asyncServerIdEndLoaded();
+				}
 			}
-			let isSessionIdleDisconnect = AscCommon.c_oCloseCode.sessionIdle === opt_closeCode;
 			if (null != opt_closeCode && !isSessionIdleDisconnect) {
-				t.sync_EndAction(Asc.c_oAscAsyncActionType.Information, Asc.c_oAscAsyncAction.Disconnect, Asc.c_oAscRestrictionType.View);
-				let allowRefresh = [c_oCloseCode.updateVersion, c_oCloseCode.noCache, c_oCloseCode.restore, c_oCloseCode.quiet];
-				if (-1 !== allowRefresh.indexOf(opt_closeCode) && !t.isDocumentModified() && t.canRefreshFile())  {
+				t.endDisconnectAction();
+				if (willRefresh) {
 					t.onRefreshFile();
 				} else {
+					t.isRefreshInProgress = false;
+					if (refreshWaitAction && t.ServerIdWaitAction === refreshWaitAction) {
+						t.ServerIdWaitAction = null;
+						t.sync_EndAction.apply(t, refreshWaitAction);
+					}
 					var error = AscCommon.getDisconnectErrorCode(t.isDocumentLoadComplete, opt_closeCode);
 					var level = t.isDocumentLoadComplete ? Asc.c_oAscError.Level.NoCritical : Asc.c_oAscError.Level.Critical;
 					t.setViewModeDisconnect(AscCommon.getEnableDownloadByCloseCode(opt_closeCode));
+					t._finishPluginQueuePause(Boolean(t.isDocumentLoadComplete));
 					if (Asc.c_oAscError.ID.UpdateVersion === error && !t.isDocumentModified()) {
 						t.sendEvent("asc_onDocumentUpdateVersion", function() {});
 					} else {
 						t.sendEvent('asc_onError', error, level);
 					}
 				}
-			} else if (!t.isActionWithRestriction()){
-				t.sync_StartAction(Asc.c_oAscAsyncActionType.Information, Asc.c_oAscAsyncAction.Disconnect, Asc.c_oAscRestrictionType.View);
-				if (isSessionIdleDisconnect) {
-					t.waitNotIdle(undefined, function () {
-						t.CoAuthoringApi.connect();
-					});
+			} else {
+				if ((endRefreshWait || (!t.ServerIdWaitComplete && isSessionIdleDisconnect)) && refreshWaitAction && t.ServerIdWaitAction === refreshWaitAction) {
+					t.ServerIdWaitAction = null;
+					t.sync_EndAction.apply(t, refreshWaitAction);
+				}
+				if (!t.isActionWithRestriction()) {
+					t.isDisconnectActionActive = true;
+					t.sync_StartAction(Asc.c_oAscAsyncActionType.Information, Asc.c_oAscAsyncAction.Disconnect, Asc.c_oAscRestrictionType.View);
+					if (isSessionIdleDisconnect) {
+						var coApi = t.CoAuthoringApi;
+						t.waitNotIdle(undefined, function () {
+							if (t.CoAuthoringApi === coApi && t.isDisconnectActionActive) {
+								coApi.connect();
+							}
+						});
+					}
 				}
 			}
 		};
 		this.CoAuthoringApi.onDocumentOpen = function (inputWrap) {
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			if (t.isOpenedFrameEditor) {
 				const oSentInformation = {
 					"type": c_oAscFrameDataType.GetLoadedImages,
@@ -2201,10 +2299,11 @@
 			}
 			if (AscCommon.EncryptionWorker.isNeedCrypt())
 			{
-                if (t.fCurCallback) {
-                	t.fCurCallback(inputWrap ? inputWrap["data"] : undefined);
-                	t.fCurCallback = null;
-                }
+				if (t.fCurCallback) {
+					var curCryptCallback = t.fCurCallback;
+					t.fCurCallback = null;
+					curCryptCallback(inputWrap ? inputWrap["data"] : undefined);
+				}
 				return;
 			}
 			if (inputWrap["data"]) {
@@ -2212,6 +2311,9 @@
 				switch (input["type"]) {
 					case 'reopen':
 					case 'open':
+						if (t._ignoreCurrentConnectionLoadEvents) {
+							return;
+						}
 						switch (input["status"]) {
 							case "updateversion":
 							case "ok":
@@ -2229,17 +2331,30 @@
 									if ('ok' === input["status"] || t.getViewMode()) {
 										t._onOpenCommand(documentUrl);
 									} else if (t.canRefreshFile()) {
-										t.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.Open);
+										t.endOpenAction();
 										t.onRefreshFile();
 									} else {
+										var loadGeneration = t.documentLoadGeneration || 0;
 										t.sendEvent("asc_onDocumentUpdateVersion", function () {
+											if ((t.documentLoadGeneration || 0) !== loadGeneration) {
+												return;
+											}
+											if (t.isRefreshInProgress || (t.ServerIdWaitAction && t.ServerIdWaitAction[1] === Asc.c_oAscAsyncAction.RefreshFile)) {
+												t.isRefreshInProgress = false;
+												t.endServerIdWaitAction();
+											}
 											if (t.isCoAuthoringEnable) {
 												t.asc_coAuthoringDisconnect();
+											}
+											if (!t.ServerIdWaitComplete) {
+												t.asyncServerIdEndLoaded();
 											}
 											t._onOpenCommand(documentUrl);
 										});
 									}
 								} else {
+									if (!t.isDocumentLoadComplete)
+										t._finishPluginQueuePause(false);
 									t.sendEvent("asc_onError", c_oAscError.ID.ConvertationOpenError,
 										c_oAscError.Level.Critical);
 								}
@@ -2251,6 +2366,8 @@
 								t._onNeedParams(null, true);
 								break;
 							case "err":
+								if (!t.isDocumentLoadComplete)
+									t._finishPluginQueuePause(false);
 								t.sendEvent("asc_onError",
 									AscCommon.mapAscServerErrorToAscError(parseInt(input["data"]),
 										Asc.c_oAscError.ID.ConvertationOpenError), c_oAscError.Level.Critical);
@@ -2259,8 +2376,9 @@
 						break;
 					default:
 						if (t.fCurCallback) {
-							t.fCurCallback(input);
+							var curCallback = t.fCurCallback;
 							t.fCurCallback = null;
+							curCallback(input);
 						} else {
 							t.sendEvent("asc_onError", c_oAscError.ID.Unknown, c_oAscError.Level.NoCritical);
 						}
@@ -2269,6 +2387,9 @@
 			}
 		};
 		this.CoAuthoringApi.onStartCoAuthoring = function (isStartEvent, isWaitAuth) {
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			if (t.isViewMode) {
 				return;
 			}
@@ -2280,6 +2401,9 @@
 			}
 		};
 		this.CoAuthoringApi.onEndCoAuthoring = function (isStartEvent) {
+			if (this !== t.CoAuthoringApi) {
+				return;
+			}
 			if (t.canUnlockDocument) {
 				t.canStartCoAuthoring = false;
 			} else {
@@ -2320,12 +2444,11 @@
 	baseEditorsApi.prototype._applyPreOpenLocks                  = function()
 	{
 		this.isPreOpenLocks = false;
-		// Apply all locks (ToDo possibly worth reconsidering locks in general)
-		for (var i = 0; i < this.arrPreOpenLocksObjects.length; ++i)
-		{
-			this.arrPreOpenLocksObjects[i]();
-		}
+		var locks = this.arrPreOpenLocksObjects;
 		this.arrPreOpenLocksObjects = [];
+		var generation = this.documentLoadGeneration;
+		for (var i = 0; i < locks.length && this.documentLoadGeneration === generation; ++i)
+			locks[i]();
 	};
 	baseEditorsApi.prototype.asc_coAuthoringDisconnect           = function()
 	{
@@ -2988,7 +3111,7 @@
 	baseEditorsApi.prototype.asc_showRevision   = function(newObj)
 	{
 		if (!newObj.docId || !this.isDocumentLoadComplete) {
-			return;
+			return false;
 		}
 		if (this.isCoAuthoringEnable) {
 			this.asc_coAuthoringDisconnect();
@@ -3020,6 +3143,7 @@
 			this.ServerIdWaitAction = [Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.Open];
 			this.sync_StartAction.apply(this, this.ServerIdWaitAction);
 			this.reopenFileWithReconnection(newDocInfo);
+			return true;
 		} else if (this.VersionHistory.currentChangeId < newObj.currentChangeId) {
 			var oApi = Asc.editor || editor;
 			this.isApplyChangesOnVersionHistory = true;
@@ -3028,17 +3152,284 @@
 			AscCommon.CollaborativeEditing.Clear_CollaborativeMarks();
 			oApi.VersionHistory.applyChanges(oApi);
 			AscCommon.CollaborativeEditing.Apply_Changes();
+			return true;
 		}
+		return false;
 	};
 	baseEditorsApi.prototype.getVersionHistory = function()
 	{
 		return this.VersionHistory;
+	};
+	baseEditorsApi.prototype.startFontLoadAction = function(type, id) {
+		var previousAction = this.activeFontLoadAction;
+		this.activeFontLoadAction = [type, id];
+		this.sync_StartAction(type, id);
+		if (previousAction)
+			this.sync_EndAction.apply(this, previousAction);
+	};
+	baseEditorsApi.prototype.endFontLoadAction = function() {
+		var action = this.activeFontLoadAction;
+		this.activeFontLoadAction = null;
+		if (action)
+			this.sync_EndAction.apply(this, action);
+	};
+	baseEditorsApi.prototype.startImageLoadAction = function(type, id) {
+		var previousAction = this.activeImageLoadAction;
+		this.activeImageLoadAction = [type, id];
+		this.sync_StartAction(type, id);
+		if (previousAction)
+			this.sync_EndAction.apply(this, previousAction);
+	};
+	baseEditorsApi.prototype.endImageLoadAction = function() {
+		var action = this.activeImageLoadAction;
+		this.activeImageLoadAction = null;
+		this.EndActionLoadImages = 0;
+		if (action)
+			this.sync_EndAction.apply(this, action);
+	};
+	baseEditorsApi.prototype.startApplyChangesAction = function() {
+		if (!this.isApplyChangesActionActive) {
+			this.isApplyChangesActionActive = true;
+			this.sync_StartAction(c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
+		}
+	};
+	baseEditorsApi.prototype.endApplyChangesAction = function() {
+		if (this.isApplyChangesActionActive) {
+			this.isApplyChangesActionActive = false;
+			this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
+		}
+	};
+	baseEditorsApi.prototype.endOpenSilentMode = function(expectedDoc) {
+		var doc = this.openSilentModeDocument;
+		if (doc && (!expectedDoc || expectedDoc === doc)) {
+			this.openSilentModeDocument = null;
+			doc.End_SilentMode(false);
+		}
+	};
+	baseEditorsApi.prototype.endServerIdWaitAction = function() {
+		var action = this.ServerIdWaitAction;
+		this.ServerIdWaitAction = null;
+		if (action)
+			this.sync_EndAction.apply(this, action);
+	};
+	baseEditorsApi.prototype.isPluginQueueSuspended = function() {
+		return Boolean(this.isAbortingDocumentLoad || this.isPluginQueuePausedForRefresh);
+	};
+	baseEditorsApi.prototype._pausePluginQueueForRefresh = function() {
+		this.isPluginQueuePausedForRefresh = true;
+	};
+	baseEditorsApi.prototype._finishPluginQueuePause = function(canResume) {
+		var wasPaused = Boolean(this.isPluginQueuePausedForRefresh);
+		this.isPluginQueuePausedForRefresh = false;
+		var plugins = (typeof window !== 'undefined') ? window.g_asc_plugins : null;
+		if (!plugins)
+			return;
+		if (canResume) {
+			if (wasPaused) {
+				var flush = plugins.flushQueue || plugins._runNextCommand;
+				if (flush)
+					flush.call(plugins);
+			}
+		} else if (plugins.cancelQueuedCommands) {
+			plugins.cancelQueuedCommands(false);
+		}
+	};
+	baseEditorsApi.prototype._runAbortScope = function(fn) {
+		var isOuter = !this._activeAbortNotifications;
+		var notifications = isOuter ? [] : this._activeAbortNotifications;
+		var holdLongAction = isOuter && Boolean(this.incrementCounterLongAction && this.decrementCounterLongAction);
+		var prevAborting = Boolean(this.isAbortingDocumentLoad);
+		var incrementedLongAction = false;
+		var fnThrew = false;
+		if (isOuter)
+			this._activeAbortNotifications = notifications;
+		this.isAbortingDocumentLoad = true;
+		try {
+			if (holdLongAction) {
+				this.incrementCounterLongAction();
+				incrementedLongAction = true;
+			}
+			return fn.call(this);
+		} catch (err) {
+			fnThrew = true;
+			throw err;
+		} finally {
+			if (isOuter) {
+				this._activeAbortNotifications = null;
+				var firstCleanupError = null;
+				var hasCleanupError = false;
+				var captureError = function(err) {
+					if (!hasCleanupError) {
+						hasCleanupError = true;
+						firstCleanupError = err;
+					}
+				};
+				try {
+					if (incrementedLongAction) {
+						try {
+							this.decrementCounterLongAction();
+						} catch (err) {
+							captureError(err);
+						}
+					}
+					for (var i = 0; i < notifications.length; ++i) {
+						try {
+							notifications[i]();
+						} catch (err) {
+							captureError(err);
+						}
+					}
+					var plugins = (typeof window !== 'undefined') ? window.g_asc_plugins : null;
+					if (!prevAborting && plugins && plugins.cancelQueuedCommands) {
+						try {
+							plugins.cancelQueuedCommands(false, this.documentLoadGeneration || 0);
+						} catch (err) {
+							captureError(err);
+						}
+					}
+				} finally {
+					this.isAbortingDocumentLoad = prevAborting;
+				}
+				if (!fnThrew && !prevAborting && !this.isPluginQueueSuspended()) {
+					var pluginsAfter = (typeof window !== 'undefined') ? window.g_asc_plugins : null;
+					var flushAfter = pluginsAfter && (pluginsAfter.flushQueue || pluginsAfter._runNextCommand);
+					if (flushAfter) {
+						try {
+							flushAfter.call(pluginsAfter);
+						} catch (err) {
+							captureError(err);
+						}
+					}
+				}
+				if (!fnThrew && hasCleanupError)
+					throw firstCleanupError;
+			} else {
+				this.isAbortingDocumentLoad = prevAborting;
+			}
+		}
+	};
+	baseEditorsApi.prototype._closeDocumentLoad = function(keepServerWaitAction) {
+		this._runAbortScope(function() {
+			this._abortPendingDocumentLoad(false);
+			this.endOpenAction();
+			this.endDisconnectAction();
+			if (true !== keepServerWaitAction) {
+				this.isRefreshInProgress = false;
+				this.endServerIdWaitAction();
+				this.isPluginQueuePausedForRefresh = false;
+			}
+		});
+	};
+	baseEditorsApi.prototype._addPendingPluginPasteCancel = function(cancel) {
+		if (!this.pendingPluginPasteCancels)
+			this.pendingPluginPasteCancels = [];
+		this.pendingPluginPasteCancels.push(cancel);
+	};
+	baseEditorsApi.prototype._removePendingPluginPasteCancel = function(cancel) {
+		if (!this.pendingPluginPasteCancels)
+			return;
+		var index = this.pendingPluginPasteCancels.indexOf(cancel);
+		if (-1 !== index)
+			this.pendingPluginPasteCancels.splice(index, 1);
+	};
+	baseEditorsApi.prototype._cancelPendingPluginPastes = function(notifications) {
+		var cancels = this.pendingPluginPasteCancels;
+		if (cancels && cancels.length) {
+			this.pendingPluginPasteCancels = [];
+			for (var i = 0; i < cancels.length; ++i)
+				cancels[i](notifications);
+		}
+		if (this.cancelPendingPluginPaste) {
+			var legacyCancel = this.cancelPendingPluginPaste;
+			this.cancelPendingPluginPaste = null;
+			legacyCancel(notifications);
+		}
+	};
+	baseEditorsApi.prototype._abortPendingDocumentLoad = function(clearPartialDocumentState) {
+		this._runAbortScope(function() {
+			var pendingNotifications = this._activeAbortNotifications;
+			this.documentLoadGeneration = (this.documentLoadGeneration || 0) + 1;
+			this.wopiRefreshRequestId = (this.wopiRefreshRequestId || 0) + 1;
+			this.arrPreOpenLocksObjects = [];
+			this.isPreOpenLocks = true;
+
+			if (this.ThemeLoader && this.ThemeLoader.cancelLoadTheme)
+				this.ThemeLoader.cancelLoadTheme(pendingNotifications);
+			if (this.FontLoader && this.FontLoader.cancelDocumentLoad)
+				this.FontLoader.cancelDocumentLoad();
+			if (this.ImageLoader && this.ImageLoader.cancelDocumentLoad)
+				this.ImageLoader.cancelDocumentLoad();
+			if (this.DocumentRenderer) {
+				if (this.DocumentRenderer.cancelPendingLoad)
+					this.DocumentRenderer.cancelPendingLoad();
+				else
+					this.DocumentRenderer.isDocumentContentReady = false;
+			}
+
+			this.endFontLoadAction();
+			this.endImageLoadAction();
+			if (this.isPasteFonts_Images) {
+				var pasteCancel = this.pasteCancelCallback;
+				this.isPasteFonts_Images = false;
+				this.pasteImageMap = null;
+				this.pasteCallback = null;
+				this.pasteCancelCallback = null;
+				this.decrementCounterLongAction();
+				if (pasteCancel)
+					pasteCancel();
+			} else {
+				this.pasteCancelCallback = null;
+			}
+			this.endOpenSilentMode();
+
+			var collab = AscCommon.CollaborativeEditing;
+			if (collab && collab.abortPendingApplyChanges &&
+				(this.isApplyChangesActionActive || this.isSaveFonts_Images || collab.m_bApplyChangesInProgress ||
+					collab.m_bRecalculatePausedByApplyChanges || collab.m_fEndLoadCallBack || collab.waitingImagesForLoad))
+				collab.abortPendingApplyChanges(this);
+			this.endApplyChangesAction();
+			if (this.isApplyChangesOnVersionHistory) {
+				this.isApplyChangesOnVersionHistory = false;
+				this._openVersionHistoryEndCallback();
+			}
+			this.isSaveFonts_Images = false;
+			this.saveImageMap = null;
+			this.isLoadImagesCustom = false;
+			this.loadCustomImageMap = null;
+			this.asyncMethodCallback = undefined;
+
+			if (clearPartialDocumentState && !this.isDocumentLoadComplete) {
+				var logicDoc = this.WordControl && this.WordControl.m_oLogicDocument;
+				if (logicDoc && logicDoc.StopRecalculate)
+					logicDoc.StopRecalculate();
+				if (logicDoc && logicDoc.StopSpellCheck)
+					logicDoc.StopSpellCheck();
+				if (collab && collab.Clear)
+					collab.Clear();
+				// Spreadsheet history needs a workbook to send its undo and redo state.
+				if (AscCommon.History && AscCommon.History.Clear && (this.editorId !== c_oEditorId.Spreadsheet || this.wbModel))
+					AscCommon.History.Clear();
+				if (AscCommon.g_oIdCounter && AscCommon.g_oIdCounter.Clear)
+					AscCommon.g_oIdCounter.Clear();
+				if (AscCommon.g_oTableId && AscCommon.g_oTableId.Clear)
+					AscCommon.g_oTableId.Clear();
+			}
+
+			if (this._cancelPendingPluginPastes) {
+				this._cancelPendingPluginPastes(pendingNotifications);
+			} else if (this.cancelPendingPluginPaste) {
+				var legacyPasteCancel = this.cancelPendingPluginPaste;
+				this.cancelPendingPluginPaste = null;
+				legacyPasteCancel(pendingNotifications);
+			}
+		});
 	};
 	/**
 	 * Refresh the current document by closing and reopening it with provided docInfo
 	 * @param {Asc.asc_CDocInfo} docInfo
 	 */
 	baseEditorsApi.prototype.asc_refreshFile = function (docInfo) {
+		this._pausePluginQueueForRefresh();
 		let isInfinityLoop;
 		if (this.documentIsWopi) {
 			const newWopi     = docInfo.get_Wopi();
@@ -3048,22 +3439,44 @@
 		} else {
 			isInfinityLoop = docInfo.get_Id() === this.DocInfo.get_Id();
 		}
+		this.endDisconnectAction();
 		if (this.isDocumentLoadComplete) {
-			this.asc_CloseFile();
-		} else if (isInfinityLoop) {
-			if (this.ServerIdWaitAction) {
-				this.sync_EndAction.apply(this, this.ServerIdWaitAction);
+			try {
+				this.asc_CloseFile(true);
+			} catch (err) {
+				this._finishPluginQueuePause(false);
+				throw err;
 			}
+		} else if (isInfinityLoop) {
+			this._runAbortScope(function () {
+				this.isRefreshInProgress = false;
+				this._ignoreCurrentConnectionLoadEvents = true;
+				this._abortPendingDocumentLoad(true);
+				this.endOpenAction();
+				this.endServerIdWaitAction();
+				this.openResult = null;
+				this.openFileCryptBinary = null;
+				this.ServerIdWaitComplete = false;
+				this.ServerImagesWaitComplete = false;
+				this.FontLoadWaitComplete = false;
+				if (this.CoAuthoringApi && this.CoAuthoringApi.disconnect) {
+					this.CoAuthoringApi.disconnect(AscCommon.c_oCloseCode.quiet);
+				}
+			});
+			this._finishPluginQueuePause(false);
 			// Loop protection (need backoff and retry?)
 			// todo unique error
 			this.sendEvent("asc_onDocumentUpdateVersion", function () {});
 			// this.sendEvent('asc_onError', Asc.c_oAscError.ID.UpdateVersion, Asc.c_oAscError.Level.Critical);
 			return;
 		}
+		if (this.ServerIdWaitAction && this.ServerIdWaitAction[1] !== Asc.c_oAscAsyncAction.RefreshFile)
+			this.endServerIdWaitAction();
 		if (!this.ServerIdWaitAction) {
 			this.ServerIdWaitAction = [Asc.c_oAscAsyncActionType.Information, Asc.c_oAscAsyncAction.RefreshFile, Asc.c_oAscRestrictionType.View];
 			this.sync_StartAction.apply(this, this.ServerIdWaitAction);
 		}
+		this.isRefreshInProgress = true;
 		this.reopenFileWithReconnection(docInfo);
 	};
 	baseEditorsApi.prototype.canRefreshFile = function () {
@@ -3071,10 +3484,40 @@
 	}
 	baseEditorsApi.prototype.onRefreshFile = function () {
 		let t = this;
-		this.ServerIdWaitAction = [Asc.c_oAscAsyncActionType.Information, Asc.c_oAscAsyncAction.RefreshFile, Asc.c_oAscRestrictionType.View];
-		this.sync_StartAction.apply(this, this.ServerIdWaitAction);
+		this._pausePluginQueueForRefresh();
+		if (!this.isDocumentLoadComplete) {
+			this._runAbortScope(function () {
+				this._ignoreCurrentConnectionLoadEvents = true;
+				this._abortPendingDocumentLoad(false);
+				this.endOpenAction();
+				this.endDisconnectAction();
+				this.openResult = null;
+				this.openFileCryptBinary = null;
+				this.ServerIdWaitComplete = false;
+				this.ServerImagesWaitComplete = false;
+				this.FontLoadWaitComplete = false;
+				if (!this.documentIsWopi && this.CoAuthoringApi && this.CoAuthoringApi.disconnect) {
+					this.CoAuthoringApi.disconnect(AscCommon.c_oCloseCode.quiet);
+				}
+			});
+		} else {
+			this.endOpenAction();
+			this.endDisconnectAction();
+		}
+		this.wopiRefreshRequestId = (this.wopiRefreshRequestId || 0) + 1;
+		var wopiRequestId = this.wopiRefreshRequestId;
+		if (this.ServerIdWaitAction && this.ServerIdWaitAction[1] !== Asc.c_oAscAsyncAction.RefreshFile)
+			this.endServerIdWaitAction();
+		if (!this.ServerIdWaitAction) {
+			this.ServerIdWaitAction = [Asc.c_oAscAsyncActionType.Information, Asc.c_oAscAsyncAction.RefreshFile, Asc.c_oAscRestrictionType.View];
+			this.sync_StartAction.apply(this, this.ServerIdWaitAction);
+		}
+		this.isRefreshInProgress = true;
 		if (this.documentIsWopi) {
 			let callback = function (isTimeout, response) {
+				if (t.wopiRefreshRequestId !== wopiRequestId) {
+					return;
+				}
 				if (response) {
 					//todo event to simulate 'refreshFile' integrator method
 					let newDocInfo = t.DocInfo.extendWithWopiParams(response);
@@ -3082,6 +3525,10 @@
 					t.CoAuthoringApi.onMeta({'title': newDocInfo.get_Title()});
 					t.asc_refreshFile(newDocInfo);
 				} else {
+					t.isRefreshInProgress = false;
+					if (t.ServerIdWaitAction && t.ServerIdWaitAction[1] === Asc.c_oAscAsyncAction.RefreshFile)
+						t.endServerIdWaitAction();
+					t._finishPluginQueuePause(Boolean(t.isDocumentLoadComplete));
 					t.sendEvent("asc_onError", c_oAscError.ID.Unknown, c_oAscError.Level.NoCritical);
 				}
 			};
@@ -3093,11 +3540,24 @@
 		}
 	}
 	baseEditorsApi.prototype.reopenFileWithReconnection = function(docInfo) {
-		this.asc_setDocInfo(docInfo);
+		this._pausePluginQueueForRefresh();
+		this._runAbortScope(function() {
+			this._ignoreCurrentConnectionLoadEvents = false;
+			this._abortPendingDocumentLoad(true);
+			this.endOpenAction();
+			this.endDisconnectAction();
+			this.asc_setDocInfo(docInfo);
 
-		this.isOnLoadLicense = false;
-		this.ServerIdWaitComplete = false;
-		this.CoAuthoringApi.disconnect(AscCommon.c_oCloseCode.quiet);
+			this.openResult = null;
+			this.openFileCryptBinary = null;
+			this.isOnLoadLicense = false;
+			this.isApplyChangesOnOpenEnabled = true;
+			this.isApplyChangesOnOpen = false;
+			this.ServerIdWaitComplete = false;
+			this.ServerImagesWaitComplete = false;
+			this.FontLoadWaitComplete = false;
+			this.CoAuthoringApi.disconnect(AscCommon.c_oCloseCode.quiet);
+		});
 		//create new connection because new docId can be on different shard
 		this.CoAuthoringApi = new AscCommon.CDocsCoApi();
 		this._coAuthoringInit();
@@ -3275,13 +3735,18 @@
 						}
 						break;
 				}
+				if (!this.isDocumentLoadComplete)
+					this._finishPluginQueuePause(false);
 				this.sendEvent("asc_onError", c_oAscError.ID.ConvertationOpenFormat, c_oAscError.Level.Critical, errorData);
 				return;
 			}
 			if (this.VersionHistory && this.VersionHistory.documentSha256) {
 				let sha256 = AscCommon.Digest.sha256(this.openResult.data, 0, this.openResult.data.length);
 				if (this.VersionHistory.documentSha256 !== AscCommon.Hex.encode(sha256) ) {
+					this.isOpenActionActive = false;
 					this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.Open);
+					if (!this.isDocumentLoadComplete)
+						this._finishPluginQueuePause(false);
 					this.sendEvent("asc_onError", c_oAscError.ID.DocumentAndChangeMismatch, c_oAscError.Level.Critical);
 					return;
 				}
@@ -4345,13 +4810,40 @@
 
 		return new Date().getTime() - this.lastWorkTime;
 	};
+	baseEditorsApi.prototype.clearWaitNotIdle = function ()
+	{
+		if (this.waitNotIdleTimeout)
+		{
+			clearTimeout(this.waitNotIdleTimeout);
+			this.waitNotIdleTimeout = null;
+		}
+	};
+	baseEditorsApi.prototype.endDisconnectAction = function ()
+	{
+		this.clearWaitNotIdle();
+		if (this.isDisconnectActionActive)
+		{
+			this.isDisconnectActionActive = false;
+			this.sync_EndAction(Asc.c_oAscAsyncActionType.Information, Asc.c_oAscAsyncAction.Disconnect, Asc.c_oAscRestrictionType.View);
+		}
+	};
+	baseEditorsApi.prototype.endOpenAction = function ()
+	{
+		if (this.isOpenActionActive)
+		{
+			this.isOpenActionActive = false;
+			this.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.Open);
+		}
+	};
 	baseEditorsApi.prototype.waitNotIdle = function (lastWorkTime, callback)
 	{
 		let t = this;
+		this.clearWaitNotIdle();
 		//todo remove first timeout
 		//start with timeout to aviod lastWorkTime update on:
 		//onDisconnect -> asc_setRestriction -> checkLastWork and CheckTargetUpdate -> checkLastWork
-		setTimeout(function () {
+		this.waitNotIdleTimeout = setTimeout(function () {
+			t.waitNotIdleTimeout = null;
 			if (undefined === lastWorkTime) {
 				lastWorkTime = t.getLastWork();
 			}

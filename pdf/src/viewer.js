@@ -566,6 +566,8 @@
 
 		this.isFocusOnThumbnails = false;
 		this.isDocumentContentReady = false;
+		this.openSessionId = 0;
+		this.checkReadyTimerId = null;
 
 		this.doc = new AscPDF.CPDFDoc(this);
 		AscCommon.History.Document = this.doc;
@@ -701,16 +703,24 @@
 
 		this.timerAnimation = function()
 		{
-			var now = Date.now();
-			if (-1 == oThis.RequestAnimationOldTime || (now >= (oThis.RequestAnimationOldTime + 40)) || (now < oThis.RequestAnimationOldTime))
+			try
 			{
-				oThis.RequestAnimationOldTime = now;
-				oThis.timer();
+				var now = Date.now();
+				if (-1 == oThis.RequestAnimationOldTime || (now >= (oThis.RequestAnimationOldTime + 40)) || (now < oThis.RequestAnimationOldTime))
+				{
+					oThis.RequestAnimationOldTime = now;
+					oThis.timer();
+				}
 			}
-			oThis.RequestAnimationFrame.call(window, oThis.timerAnimation);
+			finally
+			{
+				oThis.RequestAnimationFrame.call(window, oThis.timerAnimation);
+			}
 		};
 
-		this.timer = function()
+		this._timerId = null;
+
+		this._runTimerTick = function()
 		{
 			// in order of importance
 
@@ -744,26 +754,38 @@
 			{
 				oThis.checkPagesText();
 
-				if (this.isFullTextMessage)
+				if (oThis.isFullTextMessage)
 				{
 					var countSync = 10;
-					while ((countSync > 0) && !this.isFullText)
+					while ((countSync > 0) && !oThis.isFullText)
 					{
 						oThis.checkPagesText();
 						--countSync;
 					}
 				}
 			}
+		};
 
-			if (!oThis.UseRequestAnimationFrame)
+		this.timer = function()
+		{
+			try
 			{
-				setTimeout(oThis.timer, 40);
+				oThis._runTimerTick();
+			}
+			finally
+			{
+				if (!oThis.UseRequestAnimationFrame)
+				{
+					if (oThis._timerId !== null)
+						clearTimeout(oThis._timerId);
+					oThis._timerId = setTimeout(oThis.timer, 40);
+				}
 			}
 		};
 
 		this.timerSync = function()
 		{
-			this.timer();
+			this._runTimerTick();
 		};
 
 		this.CreateScrollSettings = function()
@@ -869,8 +891,9 @@
 
 			if (this._fileData != null)
 			{
-				this.open(this._fileData);
-				delete this._fileData;
+				let data = this._fileData;
+				this._fileData = null;
+				this.open(data);
 			}
 		};
 
@@ -944,7 +967,7 @@
 
 			this.scheduleRepaint();
 		};
-		this.scheduleRepaint = function(onRepaintCallback, onAfterPaintCallback) {
+		this.scheduleRepaint = function(onRepaintCallback, onAfterPaintCallback, onCancelCallback) {
 			let oThis = this;
 			if (this.scheduledRepaintTimer == null) {
 				this.scheduledRepaintTimer = setTimeout(function() {
@@ -956,7 +979,7 @@
 					oThis.onRepaintCallbacks.forEach(function(callback) {
 						callback();
 					});
-					
+
 					oThis.onRepaintCallbacks.splice(0, nCallbacks);
 
 					if (oThis.Api && oThis.Api.printPreview)
@@ -965,11 +988,11 @@
 					oThis.isRepaint = true;
 				});
 			}
-			
+
 			if (onRepaintCallback)
 				this.onRepaintCallbacks.push(onRepaintCallback);
 			if (onAfterPaintCallback)
-				this.onAfterPaintCallback.push(onAfterPaintCallback);
+				this.onAfterPaintCallback.push(onCancelCallback ? { callback: onAfterPaintCallback, onCancel: onCancelCallback } : onAfterPaintCallback);
 		};
 
 		this.onRepaintForms = function(pages) {
@@ -1066,17 +1089,23 @@
 				xhr.setRequestHeader('Accept-Charset', 'x-user-defined');
 
 			var _t = this;
+			let sessionId = this.openSessionId;
+			let file = this.file;
 			xhr.onload = function()
 			{
+				if (sessionId !== _t.openSessionId || file !== _t.file)
+					return;
 				if (this.status === 200 || location.href.indexOf("file:") == 0)
 				{
 					_t.isCMapLoading = false;
-					_t.file.setCMap(new Uint8Array(this.response));
+					file.setCMap(new Uint8Array(this.response));
 					_t.onDocumentReady();
 				}
 			};
 			xhr.onerror = function()
 			{
+				if (sessionId !== _t.openSessionId || file !== _t.file)
+					return;
 				_t.cmap_load_index++;
 				if (_t.cmap_load_index < _t.cmap_load_max)
 				{
@@ -1092,12 +1121,19 @@
 			xhr.send(null);
 		};
 
-		this.checkReady = function() {
+		this.checkReady = function(expectedSessionId = this.openSessionId) {
+			if (expectedSessionId !== this.openSessionId)
+				return;
+
+			clearTimeout(this.checkReadyTimerId);
 			let _t = this;
 			let oDoc = this.getPDFDoc();
 
 			// there's a problem in the interface - need to send onDocumentContentReady after setAdvancedOptions
-			setTimeout(function(){
+			this.checkReadyTimerId = setTimeout(function(){
+				if (expectedSessionId !== _t.openSessionId)
+					return;
+				_t.checkReadyTimerId = null;
 
 				if (!_t.isStarted)
 				{
@@ -1120,6 +1156,8 @@
 
 				if (_t.isStarted && _t.pageDetector && !oDoc.fontLoader.isWorking() && _t.IsOpenFormsInProgress == false && _t.initPaintDone) {
 					_t.sendEvent("onFileOpened");
+					if (expectedSessionId !== _t.openSessionId)
+						return;
 
 					_t.sendEvent("onPagesCount", _t.file.pages.length);
 					_t.sendEvent("onCurrentPageChanged", 0);
@@ -1129,7 +1167,7 @@
 				}
 				else {
 					_t.id_main.style.display = "none";
-					_t.checkReady();
+					_t.checkReady(expectedSessionId);
 				}
 				
 			}, 0);
@@ -1154,6 +1192,7 @@
 			if (this.drawingPages[0]) {
 				this.navigateToPage(0, 0, this.scrollMaxX / 2);
 			}
+			this.paint();
 
 			this.isDocumentReady = true;
 			
@@ -1202,6 +1241,8 @@
 
 			if (!this.file)
 			{
+				if (this.Api && !this.Api.isDocumentLoadComplete && this.Api._finishPluginQueuePause)
+					this.Api._finishPluginQueuePause(false);
 				this.Api.sendEvent("asc_onError", Asc.c_oAscError.ID.ConvertationOpenError, Asc.c_oAscError.Level.Critical);
 				return;
 			}
@@ -1210,8 +1251,11 @@
 			if (this.file.isNeedPassword())
 			{
 				// when re-entering password - interface problems if done synchronously
+				let sessionId = this.openSessionId;
+				let file = this.file;
 				setTimeout(function(){
-					_t.sendEvent("onNeedPassword");
+					if (sessionId === _t.openSessionId && file === _t.file)
+						_t.sendEvent("onNeedPassword");
 				}, 100);
 				return;
 			}
@@ -1258,7 +1302,11 @@
 			this.checkLoadCMap();
 
 			if (this.file && !this.file.isNeedPassword() && !this.file.isValid())
+			{
+				if (this.Api && !this.Api.isDocumentLoadComplete && this.Api._finishPluginQueuePause)
+					this.Api._finishPluginQueuePause(false);
 				this.Api.sendEvent("asc_onError", Asc.c_oAscError.ID.ConvertationOpenError, Asc.c_oAscError.Level.Critical);
+			}
 
 			this.Api.WordControl.m_oOverlayApi = this.overlay;
 
@@ -1274,8 +1322,81 @@
 			AscCommon.g_oIdCounter.Set_Load(isLoad);
 		};
 
+		this._cancelPendingPaintCallbacks = function(pendingAfterPaint)
+		{
+			if (!pendingAfterPaint || !pendingAfterPaint.length)
+				return;
+			var abortNotifications = (this.Api && this.Api._activeAbortNotifications) ? this.Api._activeAbortNotifications : null;
+			for (var i = 0; i < pendingAfterPaint.length; ++i)
+			{
+				var entry = pendingAfterPaint[i];
+				if (entry && typeof entry !== "function" && entry.onCancel)
+				{
+					if (abortNotifications)
+						abortNotifications.push(entry.onCancel);
+					else
+					{
+						try
+						{
+							entry.onCancel();
+						}
+						catch (err)
+						{
+							// Ignore callback error so remaining pending cancellations still run.
+						}
+					}
+				}
+			}
+		};
+
+		this.cancelPendingLoad = function(keepFile)
+		{
+			++this.openSessionId;
+			clearTimeout(this.checkReadyTimerId);
+			this.checkReadyTimerId = null;
+			this.isDocumentContentReady = false;
+			this.isDocumentReady = false;
+			this._fileData = null;
+			this.isCMapLoading = false;
+			this.IsOpenFormsInProgress = false;
+			if (!keepFile && this.file)
+			{
+				if (this.file.isValid && this.file.isValid())
+				{
+					this.close();
+					this.file = null;
+				}
+				else
+				{
+					if (this.file.close)
+						this.file.close();
+					this.file = null;
+					this.SearchResults = null;
+					this.pageDetector = null;
+					this.initPaintDone = false;
+					this.isRepaint = false;
+					if (this.scheduledRepaintTimer != null)
+					{
+						clearTimeout(this.scheduledRepaintTimer);
+						this.scheduledRepaintTimer = null;
+					}
+					if (this.onRepaintCallbacks)
+						this.onRepaintCallbacks.length = 0;
+					var pendingAfterPaint = this.onAfterPaintCallback ? this.onAfterPaintCallback.slice() : [];
+					if (this.onAfterPaintCallback)
+						this.onAfterPaintCallback.length = 0;
+					if (this.thumbnails && this.thumbnails.clear)
+						this.thumbnails.clear();
+					if (this._cancelPendingPaintCallbacks)
+						this._cancelPendingPaintCallbacks(pendingAfterPaint);
+				}
+			}
+		};
+
 		this.close = function()
 		{
+			this.cancelPendingLoad(true);
+
 			if (!this.file || !this.file.isValid())
 				return;
 
@@ -1286,8 +1407,33 @@
 
 			this.startVisiblePage = -1;
 			this.endVisiblePage = -1;
+			this.documentWidth = 0;
+			this.documentHeight = 0;
+			this.scrollX = 0;
+			this.scrollY = 0;
+			this.scrollMaxX = 0;
+			this.scrollMaxY = 0;
 			this.pagesInfo = new CDocumentPagesInfo();
 			this.drawingPages = [];
+			this.pageDetector = null;
+			this.initPaintDone = false;
+			this.isMouseDown = false;
+			this.isRepaint = false;
+			if (this.timerScrollSelect >= 0)
+			{
+				clearInterval(this.timerScrollSelect);
+				this.timerScrollSelect = -1;
+			}
+			if (this.scheduledRepaintTimer != null)
+			{
+				clearTimeout(this.scheduledRepaintTimer);
+				this.scheduledRepaintTimer = null;
+			}
+			if (this.onRepaintCallbacks)
+				this.onRepaintCallbacks.length = 0;
+			var pendingAfterPaint = this.onAfterPaintCallback ? this.onAfterPaintCallback.slice() : [];
+			if (this.onAfterPaintCallback)
+				this.onAfterPaintCallback.length = 0;
 
 			this.statistics = {
 				paragraph : 0,
@@ -1298,20 +1444,49 @@
 			};
 
 			this.SearchResults = null;
+			this.IsSearch = false;
+			this.CurrentSearchNavi = null;
 			this.isClearPages = false;
 
+			var hadFullTextMessage = this.isFullTextMessage;
 			this.isFullText = false;
 			this.isFullTextMessage = false;
 			this.fullTextMessageCallback = null;
 			this.fullTextMessageCallbackArgs = null;
+			if (hadFullTextMessage && this.Api && this.Api.sync_EndAction)
+				this.Api.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.Waiting);
 
-			this.isDocumentReady = false;
-			
 			let oDoc = this.getPDFDoc();
-			oDoc && oDoc.BlurActiveObject();
+			if (oDoc)
+			{
+				oDoc.BlurActiveObject();
+				if (oDoc.SearchEngine && oDoc.SearchEngine.Clear)
+					oDoc.SearchEngine.Clear();
+				oDoc.pagesTransform = [];
+			}
+			if (this.drawingDocument)
+			{
+				this.drawingDocument.m_arrPages = [];
+				this.drawingDocument.m_lPagesCount = 0;
+				this.drawingDocument.m_lDrawingFirst = -1;
+				this.drawingDocument.m_lDrawingEnd = -1;
+			}
+			if (this.thumbnails && this.thumbnails.clear)
+				this.thumbnails.clear();
 
-			this._paint();
+			if (this.canvas)
+				this.canvas.width = this.canvas.width;
+			if (this.canvasForms && this.canvasForms.getContext)
+			{
+				var formCtx = this.canvasForms.getContext("2d");
+				if (formCtx)
+					formCtx.clearRect(0, 0, this.canvasForms.width, this.canvasForms.height);
+			}
+			if (this.overlay && this.overlay.Clear)
+				this.overlay.Clear();
 			this.onUpdateOverlay();
+			if (this._cancelPendingPaintCallbacks)
+				this._cancelPendingPaintCallbacks(pendingAfterPaint);
 		};
 
 		this.getFileNativeBinary = function()
@@ -1458,6 +1633,9 @@
 
 		this.navigate = function(id)
 		{
+			if (!this.file || !this.file.isValid() || !this.structure)
+				return;
+
 			var item = this.structure[id];
 			if (!item)
 				return;
@@ -1937,6 +2115,9 @@
 					}
 				}
 			}
+
+			if (!oThis.file || !oThis.file.isValid())
+				return;
 
 			if (mouseButton !== 0)
 			{
@@ -2431,9 +2612,9 @@
 			}
 		};
 
-		this.paint = function(onRepaintCallback, onAfterPaintCallback)
+		this.paint = function(onRepaintCallback, onAfterPaintCallback, onCancelCallback)
 		{
-			this.scheduleRepaint(onRepaintCallback, onAfterPaintCallback);
+			this.scheduleRepaint(onRepaintCallback, onAfterPaintCallback, onCancelCallback);
 		};
 		
 		this.getStructure = function()
@@ -2556,7 +2737,7 @@
 			this.overlay.Clear();
 			oDrDoc.AutoShapesTrack.PageIndex = -1;
 			
-			if (!this.file || this.startVisiblePage < 0 || this.endVisiblePage < 0) return;
+			if (!this.file || !this.file.isValid() || this.startVisiblePage < 0 || this.endVisiblePage < 0) return;
 			
 			const ctx = this.overlay.m_oContext;
 			ctx.globalAlpha = 0.2;
@@ -2745,15 +2926,19 @@
 		};
 		this._paint = function()
 		{
+			if (!this.file || !this.file.isValid()) {
+				return false;
+			}
+
 			let oDoc = this.getPDFDoc();
 			Asc.editor.checkLastWork();
-			
+
 			if (oDoc.fontLoader.isFontLoadInProgress() || this.IsOpenFormsInProgress || AscCommon.CollaborativeEditing.waitingImagesForLoad || this.isCMapLoading) {
 				this.paint();
 				return false;
 			}
-			
-			if (!this.file || !this.file.isValid() || !this.canvas) {
+
+			if (!this.canvas) {
 				this.paint();
 				return false;
 			}
@@ -2947,12 +3132,15 @@
 			return true;
 		};
 		this.afterPaintCallbacks = function() {
-			this.onAfterPaintCallback.forEach(function(callback) {
-				callback();
-			});
-			
-			// clear used callbacks
+			var callbacks = this.onAfterPaintCallback.slice();
+			// clear used callbacks before invoking so re-entrant paint() callbacks are preserved
 			this.onAfterPaintCallback.length = 0;
+			callbacks.forEach(function(entry) {
+				if (typeof entry === "function")
+					entry();
+				else if (entry && entry.callback)
+					entry.callback();
+			});
 		}
 		this.updatePageDetector = function() {
 			this.pageDetector = new CCurrentPageDetector(this.canvas.width, this.canvas.height);
@@ -3075,13 +3263,13 @@
 		
 		this.checkPagesLinks = function()
 		{
-			if (this.startVisiblePage < 0 || this.endVisiblePage < 0)
+			if (!this.file || !this.file.isValid() || this.startVisiblePage < 0 || this.endVisiblePage < 0)
 				return false;
 
 			for (var i = this.startVisiblePage; i <= this.endVisiblePage; i++)
 			{
 				var page = this.pagesInfo.pages[i];
-				if (page.isPainted && null === page.links && this.file.pages[i].originIndex != undefined)
+				if (page && page.isPainted && null === page.links && this.file.pages[i] && this.file.pages[i].originIndex != undefined)
 				{
 					page.links = this.file.getLinks(this.file.pages[i].originIndex);
 					return true;
@@ -3093,7 +3281,7 @@
 
 		this.checkPagesText = function()
 		{
-			if (this.startVisiblePage < 0 || this.endVisiblePage < 0)
+			if (!this.file || !this.file.isValid() || this.startVisiblePage < 0 || this.endVisiblePage < 0)
 				return false;
 
 			if (this.isFullText)
@@ -3256,14 +3444,20 @@
 
 		this.Copy = function(_text_format)
 		{
+			if (!this.file || !this.file.isValid())
+				return false;
 			return this.file.copy(_text_format);
 		};
 		this.selectAll = function()
 		{
+			if (!this.file || !this.file.isValid())
+				return;
 			return this.file.selectAll();
 		};
 		this.removeSelection = function()
 		{
+			if (!this.file || !this.file.isValid())
+				return false;
 			let pageObjectLogic = this.getPageByCoords2(AscCommon.global_mouseEvent.X, AscCommon.global_mouseEvent.Y);
 			if (!pageObjectLogic) {
 				return false;
@@ -3284,6 +3478,8 @@
 
 		this.findText = function(props, isNext, callback)
 		{
+			if (!this.file || !this.file.isValid())
+				return false;
 			let oDoc = this.getPDFDoc();
 
 			if (!this.isFullText)
@@ -3664,6 +3860,8 @@
 
 		this.getTextCommandsSize = function()
 		{
+			if (!this.file || !this.file.isValid())
+				return 0;
 			var result = 0;
 			for (var i = 0; i < this.file.pages.length; i++)
 			{
@@ -4025,9 +4223,9 @@
 	CHtmlPage.prototype.getViewingRect = function(nPage) {
 		let oPageDetector = this.pageDetector;
 
-		let page = oPageDetector.pages.find(function(page) {
+		let page = (oPageDetector && oPageDetector.pages) ? oPageDetector.pages.find(function(page) {
 			return page.num == nPage;
-		});
+		}) : null;
 
 		if (!page)
 		{
@@ -4102,6 +4300,8 @@
 	};
 	CHtmlPage.prototype.GetPageForThumbnails = function(nPage, nWidthPx, nHeightPx) {
 		let oFile = this.file;
+		if (!oFile || !oFile.isValid() || !oFile.pages[nPage])
+			return null;
 		let image = !oFile.pages[nPage].isRecognized ? this.file.getPage(nPage, nWidthPx, nHeightPx, undefined, this.Api.isDarkMode ? 0x3A3A3A : 0xFFFFFF) : null;
 
 		if (!image) {
@@ -4135,6 +4335,8 @@
 	};
 	CHtmlPage.prototype.GetPrintPage = function(nPage, nWidthPx, nHeightPx, contentType) {
 		let oFile = this.file;
+		if (!oFile || !oFile.isValid() || !oFile.pages[nPage])
+			return null;
 		let image = !oFile.pages[nPage].isRecognized && contentType !== AscPDF.PRINT_CONTENT_TYPES.formsOnly ? this.file.getPage(nPage, nWidthPx, nHeightPx, undefined, 0xFFFFFF) : null;
 
 		if (!image) {

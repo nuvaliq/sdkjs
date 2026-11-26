@@ -2398,11 +2398,17 @@ background-repeat: no-repeat;\
 	asc_docs_api.prototype.asc_PasteData = function(_format, data1, data2, text_data, useCurrentPoint, callback, checkLocks, rejectCallback)
 	{
 		if (AscCommon.CollaborativeEditing.Get_GlobalLock())
+		{
+			rejectCallback && rejectCallback();
 			return;
+		}
 
 		var _logicDoc = this.WordControl.m_oLogicDocument;
 		if (!_logicDoc)
+		{
+			rejectCallback && rejectCallback();
 			return;
+		}
 
 		// TODO: isPasteImage заменить на проверку того, что вставляется просто картинка
 		var isPasteImage = AscCommon.checkOnlyOneImage(data1);
@@ -7862,12 +7868,12 @@ background-repeat: no-repeat;\
 		// здесь прокинуть евент о заморозке меню
 		// и нужно вывести информацию в статус бар
 		if (this.isPasteFonts_Images)
-			this.sync_StartAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadFont);
+			(this.startFontLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadFont);
 		else if (this.isSaveFonts_Images)
-			this.sync_StartAction(c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadFont);
+			(this.startFontLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadFont);
 		else
 		{
-			this.sync_StartAction(undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
+			(this.startFontLoadAction || this.sync_StartAction).call(this, undefined === blockType ? c_oAscAsyncActionType.BlockInteraction : blockType, c_oAscAsyncAction.LoadDocumentFonts);
 
             if (undefined !== this.asyncMethodCallback)
             	return;
@@ -7914,7 +7920,9 @@ background-repeat: no-repeat;\
 	asc_docs_api.prototype.asyncFontsDocumentEndLoaded   = function(blockType)
 	{
 		// все, шрифты загружены. Теперь нужно подгрузить картинки
-		if (this.isPasteFonts_Images)
+		if (this.endFontLoadAction)
+			this.endFontLoadAction();
+		else if (this.isPasteFonts_Images)
 			this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadFont);
 		else if (this.isSaveFonts_Images)
 			this.sync_EndAction(c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadFont);
@@ -7923,8 +7931,9 @@ background-repeat: no-repeat;\
 
         if (undefined !== this.asyncMethodCallback)
         {
-            this.asyncMethodCallback();
+            var asyncCb = this.asyncMethodCallback;
             this.asyncMethodCallback = undefined;
+            asyncCb.call(this);
             return;
         }
 
@@ -7938,7 +7947,7 @@ background-repeat: no-repeat;\
 			if (_count > 0)
 			{
 				this.EndActionLoadImages = 2;
-				this.sync_StartAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadImage);
+				(this.startImageLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadImage);
 			}
 
 			var _oldAsyncLoadImages                     = this.ImageLoader.bIsAsyncLoadDocumentImages;
@@ -7956,7 +7965,7 @@ background-repeat: no-repeat;\
 			if (_count > 0)
 			{
 				this.EndActionLoadImages = 2;
-				this.sync_StartAction(c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadImage);
+				(this.startImageLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadImage);
 			}
 
 			this.ImageLoader.LoadDocumentImages(this.saveImageMap);
@@ -7989,7 +7998,7 @@ background-repeat: no-repeat;\
 		if (_count > 0)
 		{
 			this.EndActionLoadImages = 1;
-			this.sync_StartAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadDocumentImages);
+			(this.startImageLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadDocumentImages);
 		}
 
 		this.ImageLoader.bIsLoadDocumentFirst = true;
@@ -8113,7 +8122,9 @@ background-repeat: no-repeat;\
 
 		if (null != this.WordControl.m_oDrawingDocument.m_oDocumentRenderer)
 		{
-			if (this.EndActionLoadImages == 1)
+			if (this.endImageLoadAction)
+				this.endImageLoadAction();
+			else if (this.EndActionLoadImages == 1)
 			{
 				this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadDocumentImages);
 			}
@@ -8143,7 +8154,9 @@ background-repeat: no-repeat;\
 		}
 
 		// на методе _openDocumentEndCallback может поменяться this.EndActionLoadImages
-		if (this.EndActionLoadImages == 1)
+		if (this.endImageLoadAction)
+			this.endImageLoadAction();
+		else if (this.EndActionLoadImages == 1)
 		{
 			this.sync_EndAction(c_oAscAsyncActionType.BlockInteraction, c_oAscAsyncAction.LoadDocumentImages);
 		}
@@ -8166,17 +8179,28 @@ background-repeat: no-repeat;\
 		{
 			if (this.isPasteFonts_Images)
 			{
+				var pasteCb = this.pasteCallback;
 				this.isPasteFonts_Images = false;
 				this.pasteImageMap       = null;
-				this.pasteCallback();
-				this.pasteCallback            = null;
-				this.decrementCounterLongAction();
+				this.pasteCancelCallback = null;
+				this.pasteCallback       = null;
+				try
+				{
+					pasteCb && pasteCb.call(this);
+				}
+				finally
+				{
+					this.decrementCounterLongAction();
+				}
 			}
 			else if (this.isSaveFonts_Images)
 			{
 				this.isSaveFonts_Images = false;
 				this.saveImageMap       = null;
+				var loadGeneration = this.documentLoadGeneration || 0;
 				this.pre_SaveCallback();
+				if ((this.documentLoadGeneration || 0) !== loadGeneration)
+					return;
 
 				if (this.bInit_word_control === false)
 				{
@@ -8225,6 +8249,7 @@ background-repeat: no-repeat;\
 			return;
 
 		var isSendOnReady = false;
+		var loadGeneration = this.documentLoadGeneration || 0;
 
 		if (0 == this.DocumentType)
 			this.WordControl.m_oLogicDocument.LoadEmptyDocument();
@@ -8252,6 +8277,7 @@ background-repeat: no-repeat;\
                         isSendOnReady = true;
                         this.bInit_word_control = true;
                         Document.Start_SilentMode();
+                        this.openSilentModeDocument = Document;
                     }
 
 					this.isApplyChangesOnOpenEnabled = false;
@@ -8264,6 +8290,11 @@ background-repeat: no-repeat;\
 					let OtherChanges = AscCommon.CollaborativeEditing.Have_OtherChanges();
 					AscCommon.CollaborativeEditing.Apply_Changes(function()
 					{
+						if ((oThis.documentLoadGeneration || 0) !== loadGeneration) {
+							if (isSendOnReady && !oThis.endOpenSilentMode)
+								Document.End_SilentMode(false);
+							return;
+						}
 						let perfEnd = performance.now();
 						if (OtherChanges) {
 							AscCommon.sendClientLog("debug", AscCommon.getClientInfoString("onApplyChanges", perfEnd - perfStart), oThis);
@@ -8273,10 +8304,17 @@ background-repeat: no-repeat;\
 						if (isSendOnReady)
 						{
 							oThis.onDocumentContentReady();
+							if ((oThis.documentLoadGeneration || 0) !== loadGeneration)
+								return;
 							oThis.onNeedUpdateExternalReferenceOnOpen();
-							Document.End_SilentMode(false);
+							if (oThis.endOpenSilentMode)
+								oThis.endOpenSilentMode(Document);
+							else
+								Document.End_SilentMode(false);
 						}
 					});
+					if ((this.documentLoadGeneration || 0) !== loadGeneration)
+						return;
 					AscCommon.CollaborativeEditing.Release_Locks();
 
 					this.isApplyChangesOnOpen = true;
@@ -8288,6 +8326,7 @@ background-repeat: no-repeat;\
 						isSendOnReady           = true;
 						this.bInit_word_control = true;
 						Document.Start_SilentMode();
+						this.openSilentModeDocument = Document;
 					}
 
 					Document.MoveCursorToStartOfDocument();
@@ -8295,8 +8334,13 @@ background-repeat: no-repeat;\
 					if (isSendOnReady)
 					{
 						this.onDocumentContentReady();
+						if ((this.documentLoadGeneration || 0) !== loadGeneration)
+							return;
 						this.onNeedUpdateExternalReferenceOnOpen();
-						Document.End_SilentMode(false);
+						if (this.endOpenSilentMode)
+							this.endOpenSilentMode(Document);
+						else
+							Document.End_SilentMode(false);
 					}
 				}
 
@@ -8325,6 +8369,8 @@ background-repeat: no-repeat;\
             isSendOnReady = true;
 			this.bInit_word_control = true;
 			this.onDocumentContentReady();
+			if ((this.documentLoadGeneration || 0) !== loadGeneration)
+				return;
 			this.onNeedUpdateExternalReferenceOnOpen();
 		}
 		
@@ -8483,7 +8529,7 @@ background-repeat: no-repeat;\
 		return true;
 	};
 
-	asc_docs_api.prototype.pre_Paste = function(_fonts, _images, callback)
+	asc_docs_api.prototype.pre_Paste = function(_fonts, _images, callback, onCancel)
 	{
 		if (undefined !== window["native"] && undefined !== window["native"]["GetImageUrl"])
 		{
@@ -8496,6 +8542,7 @@ background-repeat: no-repeat;\
 			return;
 		}
 		this.pasteCallback = callback;
+		this.pasteCancelCallback = onCancel || null;
 		this.pasteImageMap = _images;
 
 		var _count = 0;
@@ -8507,8 +8554,11 @@ background-repeat: no-repeat;\
 		{
 			// никаких евентов. ничего грузить не нужно. сделано для сафари под макОс.
 			// там при LongActions теряется фокус и вставляются пробелы
-			this.pasteCallback();
-			this.pasteCallback            = null;
+			var pasteCb = this.pasteCallback;
+			this.pasteImageMap       = null;
+			this.pasteCancelCallback = null;
+			this.pasteCallback       = null;
+			pasteCb && pasteCb.call(this);
 
 			return;
 		}
@@ -8550,7 +8600,7 @@ background-repeat: no-repeat;\
 		if (_count > 0)
 		{
 			this.EndActionLoadImages = 2;
-			this.sync_StartAction(c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadImage);
+			(this.startImageLoadAction || this.sync_StartAction).call(this, c_oAscAsyncActionType.Information, c_oAscAsyncAction.LoadImage);
 		}
 
 		this.ImageLoader.LoadDocumentImages(this.loadCustomImageMap);
@@ -8562,7 +8612,10 @@ background-repeat: no-repeat;\
 
 	asc_docs_api.prototype.pre_SaveCallback = function()
 	{
+		var loadGeneration = this.documentLoadGeneration || 0;
 		AscCommon.CollaborativeEditing.OnEnd_Load_Objects();
+		if ((this.documentLoadGeneration || 0) !== loadGeneration)
+			return;
 
 		if (this.isApplyChangesOnOpen)
 		{
@@ -10131,25 +10184,33 @@ background-repeat: no-repeat;\
 	{
 		this.WordControl.m_oLogicDocument.Document_Undo({All : true});
 	};
-	asc_docs_api.prototype.asc_CloseFile            = function()
+	asc_docs_api.prototype.asc_CloseFile            = function(keepServerWaitAction)
 	{
-		AscCommon.History.Clear();
-		g_oIdCounter.Clear();
-		g_oTableId.Clear();
-		AscCommon.CollaborativeEditing.Clear();
-		this.isApplyChangesOnOpenEnabled = true;
-		this.isDocumentLoadComplete = false;
-		this.ServerImagesWaitComplete = false;
-		this.turnOffSpecialModes();
+		var closeBody = function()
+		{
+			this._closeDocumentLoad(keepServerWaitAction);
+			AscCommon.History.Clear();
+			g_oIdCounter.Clear();
+			g_oTableId.Clear();
+			AscCommon.CollaborativeEditing.Clear();
+			this.isApplyChangesOnOpenEnabled = true;
+			this.isDocumentLoadComplete = false;
+			this.ServerImagesWaitComplete = false;
+			this.turnOffSpecialModes();
 
-		var oLogicDocument = this.WordControl.m_oLogicDocument;
-		oLogicDocument.StopRecalculate();
-		oLogicDocument.StopSpellCheck();
-		AscCommon.pptx_content_loader.ImageMapChecker = {};
+			var oLogicDocument = this.WordControl.m_oLogicDocument;
+			oLogicDocument.StopRecalculate();
+			oLogicDocument.StopSpellCheck();
+			AscCommon.pptx_content_loader.ImageMapChecker = {};
 
-		this.WordControl.m_oDrawingDocument.CloseFile();
-		
-		this.sendEvent("asc_onCloseFile");
+			this.WordControl.m_oDrawingDocument.CloseFile();
+
+			this.sendEvent("asc_onCloseFile");
+		};
+		if (this._runAbortScope)
+			this._runAbortScope(closeBody);
+		else
+			closeBody.call(this);
 	};
 	asc_docs_api.prototype.asc_SetFastCollaborative = function(isOn)
 	{

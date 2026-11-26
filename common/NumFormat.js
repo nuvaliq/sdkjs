@@ -872,7 +872,18 @@ NumFormat.prototype =
             if(this.EOF == next)
                 break;
             else if("[" == next)
+            {
                 this._ReadBracket();
+                var bracket = this.aRawFormat[this.aRawFormat.length - 1];
+                if(useLocaleFormat && ";" === DecimalSeparator && /^\.0+$/.test(bracket.val))
+                {
+                    // Use an explicit token when the regional decimal sign is a section delimiter.
+                    this.aRawFormat.pop();
+                    this._addToFormat(numFormat_DecimalPoint, gc_sFormatDecimalPoint);
+                    for(var digit = 1; digit < bracket.val.length; ++digit)
+                        this._addToFormat(numFormat_Digit, 0);
+                }
+            }
             else if("\"" == next)
                 this._ReadText("\"");
             else if("\\" == next)
@@ -899,7 +910,7 @@ NumFormat.prototype =
             }
             else if(DecimalSeparator == next)
             {
-                this._addToFormat(numFormat_DecimalPoint);
+                this._addToFormat(numFormat_DecimalPoint, next);
             }
             else if("/" == next)
             {
@@ -1311,11 +1322,14 @@ NumFormat.prototype =
                         nFormatLength -= (nDigCount - 1);
                         i++;
                         this.bMillisec = true;
-
+                        item.type = numFormat_DecimalPointText;
+                        item.val = null;
                     }
-                    //convert all subsequent to text
-                    item.type = numFormat_DecimalPointText;
-                    item.val = null;
+                    else
+                    {
+                        item.type = numFormat_Text;
+                        item.isLiteral = true;
+                    }
                 }
                 else if(FormatStates.Decimal == nReadState)
                     nReadState = FormatStates.Frac;
@@ -2229,7 +2243,7 @@ NumFormat.prototype =
                 }
                 else if(numFormat_Text == item.type)
                 {
-					if(',' === item.val && isArabic) {
+					if(',' === item.val && isArabic && !item.isLiteral) {
 						oCurText.text += "،";
 					} else {
 						oCurText.text += item.val;
@@ -2652,7 +2666,7 @@ NumFormat.prototype =
                     res += DecimalSeparator;
             }
             else if (numFormat_DecimalPointText == item.type) {
-                res += DecimalSeparator;
+                res += ";" === DecimalSeparator ? "[." : DecimalSeparator;
             }
             else if(numFormat_Thousand == item.type || numFormat_ThousandText == item.type)
             {
@@ -2696,6 +2710,9 @@ NumFormat.prototype =
             {
                 if("%" == item.val)
                     res += item.val;
+                // Quoted commas in existing formats retain Arabic localization.
+                else if("," == item.val && item.isLiteral)
+                    res += "[$,]";
                 else
                     res += "\"" + item.val + "\"";
             }
@@ -2781,7 +2798,11 @@ NumFormat.prototype =
             else if(numFormat_AmPm == item.type)
                 res += "AM/PM";
             else if(numFormat_Milliseconds == item.type)
+            {
                 res += fFormatToString(item.format);
+                if(";" === DecimalSeparator)
+                    res += "]";
+            }
 			else if(numFormat_Plus == item.type)
 				res += "+";
 			else if(numFormat_Minus == item.type)

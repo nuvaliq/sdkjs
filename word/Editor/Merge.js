@@ -725,7 +725,7 @@
 
 
 
-    CDocumentMergeComparison.prototype.compare = function (callback) {
+    CDocumentMergeComparison.prototype.compare = function (callback, onCancel) {
         const oOriginalDocument = this.originalDocument;
         const oRevisedDocument = this.revisedDocument;
         if (!oOriginalDocument || !oRevisedDocument) {
@@ -767,7 +767,7 @@
             }
             oApi.pre_Paste(aFonts, oImageMap, function () {
                 callback && callback();
-            });
+            }, onCancel);
         };
         AscCommon.sendImgUrls(oApi, oObjectsForDownload.aUrls, fCallback, true);
         return null;
@@ -804,6 +804,21 @@
         oApi.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.SlowOperation);
     };
 
+    CDocumentMerge.prototype.cancelMergeCallback = function () {
+        const oOriginalDocument = this.originalDocument;
+        const oApi = this.api;
+        if (!(oApi && oOriginalDocument)) {
+            return;
+        }
+        oOriginalDocument.SetTrackRevisions(this.oldTrackRevisions);
+        const oTrackRevisionManager = oOriginalDocument.TrackRevisionsManager;
+        if (oTrackRevisionManager) {
+            oTrackRevisionManager.SkipPreDeleteMoveMarks = this.oldSkipPreDeleteMoveMarks;
+        }
+        oOriginalDocument.End_SilentMode(false);
+        oApi.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.SlowOperation);
+    };
+
     CDocumentMerge.prototype.merge = function () {
         const oOriginalDocument = this.originalDocument;
         const oRevisedDocument = this.revisedDocument;
@@ -818,7 +833,7 @@
         const oTrackRevisionManager = oOriginalDocument.TrackRevisionsManager;
         this.oldSkipPreDeleteMoveMarks = oTrackRevisionManager.SkipPreDeleteMoveMarks;
         oTrackRevisionManager.SkipPreDeleteMoveMarks = true;
-        this.comparison.compare(this.applyLastMergeCallback.bind(this));
+        this.comparison.compare(this.applyLastMergeCallback.bind(this), this.cancelMergeCallback.bind(this));
     };
 
 

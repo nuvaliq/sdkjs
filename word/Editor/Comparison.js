@@ -2714,6 +2714,11 @@
                 oOriginalDocument.FinalizeAction();
                 oApi.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.SlowOperation);
                 callback && callback();
+            }, function()
+            {
+                oOriginalDocument.SetTrackRevisions(oldTrackRevisions);
+                oOriginalDocument.End_SilentMode(false);
+                oApi.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.SlowOperation);
             });
         };
         if (oApi.getViewMode()) {

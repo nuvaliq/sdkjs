@@ -35,6 +35,7 @@
 
 $(function () {
     window["AscCommonExcel"] = window["AscCommonExcel"] || {};
+    const spreadsheetFont = window["AscCommonExcel"].Font;
     window["AscCommonExcel"].Font = function () {};
     window["AscCommonExcel"].RgbColor = function () {};
 
@@ -1282,6 +1283,474 @@ $(function () {
         if (result) {
             assert.strictEqual(result.value, 5.5, '"5 1/2" value should be 5.5');
         }
+    });
+
+    QUnit.module('CellFormat date/time separators', function (hooks) {
+        let originalCulture;
+        let originalDate1904;
+        const time = (13 * 3600 + 14 * 60 + 15.125) / 86400;
+        const shortTime = (13 * 3600 + 14 * 60 + 15.123) / 86400;
+        const dateTime = 46361 + time;
+
+        function cultures() {
+            const clone = function (lcid) {
+                return JSON.parse(JSON.stringify(AscCommon.g_aCultureInfos[lcid]));
+            };
+            return [
+                clone(1049),
+                clone(1033),
+                Object.assign(clone(1033), {NumberDecimalSeparator: ',', NumberGroupSeparator: '.'}),
+                Object.assign(clone(1049), {NumberDecimalSeparator: '.', DateSeparator: '-'})
+            ];
+        }
+
+        function formatText(format, value, culture, type) {
+            const cellFormat = new AscCommon.CellFormat(format);
+            return cellFormat.format(value, type, 15, false, culture, true).map(function (part) {
+                return part.text;
+            }).join('');
+        }
+
+        hooks.beforeEach(function () {
+            originalCulture = JSON.parse(JSON.stringify(AscCommon.g_oDefaultCultureInfo));
+            originalDate1904 = AscCommon.bDate1904;
+        });
+
+        hooks.afterEach(function () {
+            AscCommon.setCurrentCultureInfo(originalCulture.LCID,
+                originalCulture.NumberDecimalSeparator, originalCulture.NumberGroupSeparator);
+            AscCommon.g_oDefaultCultureInfo.DateSeparator = originalCulture.DateSeparator;
+            AscCommon.g_oDefaultCultureInfo.TimeSeparator = originalCulture.TimeSeparator;
+            AscCommon.bDate1904 = originalDate1904;
+            AscCommon.oNumFormatCache.cleanCache();
+            AscCommon.oGeneralEditFormatCache.cleanCache();
+        });
+
+        QUnit.test('literal date and time points do not follow decimal or date separators', function (assert) {
+            const cases = [
+                ['dd.mm.yyyy', '05.12.2026'],
+                ['d.m.yyyy', '5.12.2026'],
+                ['yyyy.mm.dd', '2026.12.05'],
+                ['dd\\.mm\\.yyyy', '05.12.2026'],
+                ['dd"."mm"."yyyy', '05.12.2026'],
+                ['dd.mm.yyyy.', '05.12.2026.'],
+                ['hh.mm.ss', '13.14.15'],
+                ['dd.mm.yyyy;@', '05.12.2026'],
+                ['[$-409]dd.mm.yyyy', '05.12.2026']
+            ];
+            cultures().forEach(function (culture, index) {
+                cases.forEach(function (item) {
+                    assert.strictEqual(formatText(item[0], dateTime, culture), item[1],
+                        'culture ' + index + ', ' + item[0]);
+                });
+            });
+        });
+
+        QUnit.test('fractional seconds retain their decimal separator alongside literal date points', function (assert) {
+            const cases = [
+                [time, 'hh:mm:ss.000', '13:14:15,125', '13:14:15.125'],
+                [shortTime, 'mm:ss.0', '14:15,1', '14:15.1'],
+                [shortTime, 'mm:ss.00', '14:15,12', '14:15.12'],
+                [1 + time, '[h]:mm:ss.000', '37:14:15,125', '37:14:15.125'],
+                [dateTime, 'dd.mm.yyyy hh:mm:ss.000', '05.12.2026 13:14:15,125', '05.12.2026 13:14:15.125'],
+                [dateTime, '[$-409]dd.mm.yyyy hh:mm:ss.000', '05.12.2026 13:14:15,125', '05.12.2026 13:14:15.125']
+            ];
+            cultures().forEach(function (culture, index) {
+                cases.forEach(function (item) {
+                    const expected = culture.NumberDecimalSeparator === ',' ? item[2] : item[3];
+                    assert.strictEqual(formatText(item[1], item[0], culture), expected,
+                        'culture ' + index + ', ' + item[1]);
+                });
+            });
+        });
+
+        QUnit.test('millisecond rounding preserves the minute and day transitions', function (assert) {
+            const cases = [
+                [13, 14, 59.9994, '05.12.2026', '13:14:59,999', '13:14:59.999'],
+                [13, 14, 59.9996, '05.12.2026', '13:15:00,000', '13:15:00.000'],
+                [23, 59, 59.9994, '05.12.2026', '23:59:59,999', '23:59:59.999'],
+                [23, 59, 59.9996, '06.12.2026', '00:00:00,000', '00:00:00.000']
+            ];
+            cultures().slice(0, 2).forEach(function (culture) {
+                cases.forEach(function (item) {
+                    const value = 46361 + (item[0] * 3600 + item[1] * 60 + item[2]) / 86400;
+                    const expectedTime = culture.NumberDecimalSeparator === ',' ? item[4] : item[5];
+                    assert.strictEqual(formatText('hh:mm:ss.000', value, culture), expectedTime);
+                    assert.strictEqual(formatText('dd.mm.yyyy hh:mm:ss.000', value, culture),
+                        item[3] + ' ' + expectedTime);
+                });
+            });
+        });
+
+        QUnit.test('numeric decimals and culture-specific slash date separators remain unchanged', function (assert) {
+            const slashDates = ['05.12.2026', '05/12/2026', '05/12/2026', '05-12-2026'];
+            cultures().forEach(function (culture, index) {
+                assert.strictEqual(formatText('0.00', 1234.5, culture),
+                    culture.NumberDecimalSeparator === ',' ? '1234,50' : '1234.50');
+                assert.strictEqual(formatText('dd/mm/yyyy', 46361, culture), slashDates[index]);
+                assert.strictEqual(formatText('dd-mm-yyyy', 46361, culture), '05-12-2026');
+                assert.strictEqual(formatText('dd.mm.yyyy;@', 'sample', culture, AscCommon.CellValueType.String), 'sample');
+            });
+        });
+
+        QUnit.test('localized date formats can be read and reapplied without changing their meaning', function (assert) {
+            const cases = [
+                ['dd.mm.yyyy', '05.12.2026', '05.12.2026'],
+                ['dd.mm.yyyy hh:mm:ss.000', '05.12.2026 13:14:15,125', '05.12.2026 13:14:15.125']
+            ];
+            cultures().forEach(function (culture) {
+                AscCommon.setCurrentCultureInfo(culture.LCID,
+                    culture.NumberDecimalSeparator, culture.NumberGroupSeparator);
+                AscCommon.g_oDefaultCultureInfo.DateSeparator = culture.DateSeparator;
+                cases.forEach(function (item) {
+                    const source = new AscCommon.CellFormat(item[0]);
+                    const localized = source.toString(undefined, true);
+                    const reapplied = new AscCommon.CellFormat(localized, undefined, true);
+                    const expected = culture.NumberDecimalSeparator === ',' ? item[1] : item[2];
+                    assert.strictEqual(source.sFormat, item[0]);
+                    assert.strictEqual(source.oPositiveFormat.formatString, item[0]);
+                    assert.strictEqual(source.format(dateTime, undefined, 15, false, culture, true)
+                        .map(function (part) { return part.text; }).join(''), expected);
+                    assert.strictEqual(reapplied.format(dateTime, undefined, 15, false, culture, true)
+                        .map(function (part) { return part.text; }).join(''), expected);
+                });
+            });
+        });
+
+        QUnit.test('localized input and TEXT preserve comma punctuation before date fields', function (assert) {
+            AscCommon.setCurrentCultureInfo(1033, ',', '.');
+            const format = new AscCommon.CellFormat('dddd, dd', undefined, true);
+            assert.strictEqual(format.format(46361, undefined, 15, false, undefined, true)
+                .map(function (part) { return part.text; }).join(''), 'Saturday, 05');
+            const result = new AscCommonExcel.cTEXT().Calculate([
+                new AscCommonExcel.cNumber(46361), new AscCommonExcel.cString('dddd, dd')
+            ]);
+            assert.strictEqual(result.getValue(), 'Saturday, 05');
+            const milliseconds = new AscCommon.CellFormat('hh:mm:ss,000', undefined, true);
+            assert.strictEqual(milliseconds.format(time, undefined, 15, false, undefined, true)
+                .map(function (part) { return part.text; }).join(''), '13:14:15,125');
+        });
+
+        QUnit.test('Arabic TEXT retains literal decimal punctuation through format round trips', function (assert) {
+            AscCommon.setCurrentCultureInfo(1025, ',', '.');
+            const expected = 'السبت, \u200f05';
+            const format = new AscCommon.CellFormat('dddd, dd', undefined, true);
+            function text(cellFormat) {
+                return cellFormat.format(46361, undefined, 15, false, undefined, true)
+                    .map(function (part) { return part.text; }).join('');
+            }
+            assert.strictEqual(text(format), expected, 'localized input keeps the original comma');
+            assert.strictEqual(text(new AscCommon.CellFormat(format.toString())), expected,
+                'canonical format can be reapplied');
+            assert.strictEqual(text(new AscCommon.CellFormat(format.toString(undefined, true), undefined, true)),
+                expected, 'localized format can be reapplied');
+            const result = new AscCommonExcel.cTEXT().Calculate([
+                new AscCommonExcel.cNumber(46361), new AscCommonExcel.cString('dddd, dd')
+            ]);
+            assert.strictEqual(result.getValue(), expected, 'TEXT keeps U+002C');
+            const found = new (AscCommonExcel.cFormulaFunctionGroup['TextAndData'].find(function (fn) {
+                return fn.prototype.name === 'FIND';
+            }))().Calculate([new AscCommonExcel.cString(','), result]);
+            assert.strictEqual(found.getValue(), 6, 'FIND locates the original comma in TEXT');
+        });
+
+        QUnit.test('Arabic quoted punctuation retains saved format semantics', function (assert) {
+            AscCommon.setCurrentCultureInfo(1025, '.', ' ');
+            const ordinary = new AscCommon.CellFormat('dddd, dd', undefined, true);
+            assert.strictEqual(ordinary.format(46361, undefined, 15, false, undefined, true)
+                .map(function (part) { return part.text; }).join(''), 'السبت، \u200f05',
+                'ordinary comma tokens retain Arabic localization');
+            assert.strictEqual(formatText('dddd"," dd', 46361), 'السبت، \u200f05',
+                'quoted comma retains Arabic localization');
+            AscCommon.setCurrentCultureInfo(1025, ',', '.');
+            const milliseconds = new AscCommon.CellFormat('hh:mm:ss,000', undefined, true);
+            assert.strictEqual(milliseconds.format(time, undefined, 15, false, undefined, true)
+                .map(function (part) { return part.text; }).join(''), '\u200f13:14:15,\u200f125',
+                'fractional seconds still use the configured decimal separator');
+        });
+
+        QUnit.test('localized comma punctuation survives public format conversions', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            const Finder = AscCommonExcel.cFormulaFunctionGroup['TextAndData'].find(function (fn) {
+                return fn.prototype.name === 'FIND';
+            });
+            const cases = [
+                ['dddd, dd', 46361, 'السبت، \u200f05', 'Saturday, 05', '،', 6],
+                ['0,', 123, '123،', '123,', '،', 4],
+                ['dddd\\, dd', 46361, 'السبت، \u200f05', 'Saturday, 05', '،', 6],
+                ['0\\,', 123, '123،', '123,', '،', 4],
+                ['dddd"," dd', 46361, 'السبت، \u200f05', 'Saturday, 05', '،', 6],
+                ['0","', 123, '123،', '123,', '،', 4],
+                ['[$-401]dddd, dd', 46361, 'السبت، \u200f05', 'السبت، \u200f05', '،', 6]
+            ];
+            [1025, 1033].forEach(function (lcid) {
+                AscCommon.setCurrentCultureInfo(lcid, '.', ' ');
+                cases.forEach(function (item) {
+                    const expected = lcid === 1025 ? item[2] : item[3];
+                    const canonical = api.asc_convertNumFormatLocal2NumFormat(item[0]);
+                    const localized = api.asc_convertNumFormat2NumFormatLocal(canonical);
+                    assert.strictEqual(formatText(canonical, item[1]), expected,
+                        'canonical output: ' + lcid + ', ' + item[0]);
+                    const result = new AscCommonExcel.cTEXT().Calculate([
+                        new AscCommonExcel.cNumber(item[1]), new AscCommonExcel.cString(localized)
+                    ]);
+                    assert.strictEqual(result.getValue(), expected,
+                        'TEXT after both conversions: ' + lcid + ', ' + item[0]);
+                    if (lcid === 1025) {
+                        const found = new Finder().Calculate([new AscCommonExcel.cString(item[4]), result]);
+                        assert.strictEqual(found.getValue(), item[5], 'FIND after conversions: ' + item[0]);
+                    }
+                });
+            });
+        });
+
+        QUnit.test('custom decimal commas remain literal through public format conversions', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            const Finder = AscCommonExcel.cFormulaFunctionGroup['TextAndData'].find(function (fn) {
+                return fn.prototype.name === 'FIND';
+            });
+            [[1025, 'السبت, \u200f05', 6], [1033, 'Saturday, 05', 9]].forEach(function (item) {
+                AscCommon.setCurrentCultureInfo(item[0], ',', '.');
+                const canonical = api.asc_convertNumFormatLocal2NumFormat('dddd, dd');
+                const localized = api.asc_convertNumFormat2NumFormatLocal(canonical);
+                assert.strictEqual(formatText(canonical, 46361), item[1], 'canonical literal comma');
+                const result = new AscCommonExcel.cTEXT().Calculate([
+                    new AscCommonExcel.cNumber(46361), new AscCommonExcel.cString(localized)
+                ]);
+                assert.strictEqual(result.getValue(), item[1], 'TEXT after conversions');
+                assert.strictEqual(new Finder().Calculate([new AscCommonExcel.cString(','), result]).getValue(),
+                    item[2], 'FIND after conversions');
+            });
+        });
+
+        QUnit.test('serialized comma punctuation follows subsequent culture changes', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            AscCommon.setCurrentCultureInfo(1025, '.', ' ');
+            const canonical = api.asc_convertNumFormatLocal2NumFormat('dddd, dd');
+            const literal = api.asc_convertNumFormatLocal2NumFormat('dddd[$,] dd');
+            const forced = api.asc_convertNumFormatLocal2NumFormat('[$-401]dddd, dd');
+            [[1033, 'Saturday, 05', 'Saturday, 05'], [1025, 'السبت، \u200f05', 'السبت, \u200f05']]
+                .forEach(function (item) {
+                    AscCommon.setCurrentCultureInfo(item[0], '.', ' ');
+                    assert.strictEqual(formatText(canonical, 46361), item[1], 'localized punctuation');
+                    assert.strictEqual(formatText(literal, 46361), item[2], 'literal punctuation');
+                    assert.strictEqual(formatText(forced, 46361), 'السبت، \u200f05', 'explicit culture');
+                });
+        });
+
+        QUnit.test('literal date commas retain their text and date type after conversions', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            const cases = [
+                ['dd,mm,yyyy', '05,12,2026', '\u200f05,\u200f12,\u200f2026'],
+                ['dddd, dd', 'Saturday, 05', 'السبت, \u200f05'],
+                ['[$-401]dd,mm,yyyy', '\u200f05,\u200f12,\u200f2026', '\u200f05,\u200f12,\u200f2026']
+            ];
+            cases.forEach(function (item) {
+                AscCommon.setCurrentCultureInfo(1033, ',', '.');
+                const source = new AscCommon.CellFormat(item[0], undefined, true);
+                let canonical = api.asc_convertNumFormatLocal2NumFormat(item[0]);
+                [1025, 1033, 1025].forEach(function (lcid) {
+                    AscCommon.setCurrentCultureInfo(lcid, '.', ' ');
+                    const restored = new AscCommon.CellFormat(canonical);
+                    assert.strictEqual(formatText(canonical, 46361), lcid === 1025 ? item[2] : item[1],
+                        'literal commas after culture change: ' + lcid + ', ' + item[0]);
+                    assert.strictEqual(restored.getType(), source.getType(), 'date type is preserved');
+                    const localized = api.asc_convertNumFormat2NumFormatLocal(canonical);
+                    canonical = api.asc_convertNumFormatLocal2NumFormat(localized);
+                });
+            });
+        });
+
+        QUnit.test('formats saved with quoted commas retain localization when read again', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            const Finder = AscCommonExcel.cFormulaFunctionGroup['TextAndData'].find(function (fn) {
+                return fn.prototype.name === 'FIND';
+            });
+            AscCommon.setCurrentCultureInfo(1025);
+            assert.strictEqual(formatText('0","', 123), '123،', 'saved format in default ar-SA');
+            const savedText = new AscCommonExcel.cTEXT().Calculate([
+                new AscCommonExcel.cNumber(123), new AscCommonExcel.cString('0","')
+            ]);
+            assert.strictEqual(savedText.getValue(), '123،', 'TEXT reads the saved format in default ar-SA');
+            assert.strictEqual(new Finder().Calculate([
+                new AscCommonExcel.cString('،'), savedText
+            ]).getValue(), 4, 'FIND reads the saved Arabic comma in default ar-SA');
+            const savedFormats = [
+                ['0","', 123, '123،', '123,', 4],
+                ['dddd"," dd', 46361, 'السبت، \u200f05', 'Saturday, 05', 6],
+                ['dddd",",dd', 46361, 'السبت، \u200f05', 'Saturday, 05', 6],
+                ['[$-401]0","', 123, '123،', '123،', 4],
+                ['0",";0",";0",";@', 123, '123،', '123,', 4]
+            ];
+            [1025, 1033, 1025].forEach(function (lcid) {
+                AscCommon.setCurrentCultureInfo(lcid, '.', ' ');
+                savedFormats.forEach(function (item) {
+                    const expected = lcid === 1025 ? item[2] : item[3];
+                    let canonical = item[0];
+                    for (let cycle = 0; cycle < 3; cycle++) {
+                        assert.strictEqual(formatText(canonical, item[1]), expected,
+                            'read saved canonical format: ' + lcid + ', ' + item[0] + ', ' + cycle);
+                        const localized = api.asc_convertNumFormat2NumFormatLocal(canonical);
+                        const result = new AscCommonExcel.cTEXT().Calculate([
+                            new AscCommonExcel.cNumber(item[1]), new AscCommonExcel.cString(localized)
+                        ]);
+                        assert.strictEqual(result.getValue(), expected, 'TEXT reads the saved comma');
+                        if (expected.indexOf('،') !== -1) {
+                            assert.strictEqual(new Finder().Calculate([
+                                new AscCommonExcel.cString('،'), result
+                            ]).getValue(), item[4], 'FIND retains the saved Arabic comma position');
+                        }
+                        canonical = api.asc_convertNumFormatLocal2NumFormat(localized);
+                    }
+                });
+            });
+        });
+
+        QUnit.test('decimal semicolons preserve dates and milliseconds through format conversions', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            const previousFont = AscCommonExcel.Font;
+            AscCommonExcel.Font = spreadsheetFont;
+            try {
+                const cultures = [[1033, ',', ':'], [1049, ',', ':']];
+                const values = [
+                    [-1, '#'], [-0.5, '#'],
+                    [0, '00.01.1900 00:00:00;000'],
+                    [dateTime, '05.12.2026 13:14:15;125']
+                ];
+                cultures.forEach(function (culture) {
+                    AscCommon.setCurrentCultureInfo(culture[0], ';', culture[1]);
+                    AscCommon.g_oDefaultCultureInfo.TimeSeparator = culture[2];
+                    ['dd.mm.yyyy hh:mm:ss.000', '[$-409]dd.mm.yyyy hh:mm:ss.000'].forEach(function (code) {
+                        let canonical = code;
+                        for (let cycle = 0; cycle < 3; cycle++) {
+                            const localized = api.asc_convertNumFormat2NumFormatLocal(canonical);
+                            canonical = api.asc_convertNumFormatLocal2NumFormat(localized);
+                            values.forEach(function (item) {
+                                const expected = item[1].replace(/:/g, culture[2]);
+                                assert.strictEqual(formatText(canonical, item[0]), expected,
+                                    'canonical: ' + culture[0] + ', ' + code + ', ' + item[0] + ', ' + cycle);
+                                const result = new AscCommonExcel.cTEXT().Calculate([
+                                    new AscCommonExcel.cNumber(item[0]), new AscCommonExcel.cString(localized)
+                                ]);
+                                assert.strictEqual(result.getValue(), item[0] < 0 ? '' : expected,
+                                    'TEXT retains date semantics after conversion');
+                            });
+                        }
+                    });
+                });
+            } finally {
+                AscCommonExcel.Font = previousFont;
+            }
+        });
+
+        QUnit.test('decimal semicolons keep time and decimal tokens distinct', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            AscCommon.setCurrentCultureInfo(1049, ';', '.');
+            AscCommon.g_oDefaultCultureInfo.TimeSeparator = '.';
+            let canonical = 'dd.mm.yyyy hh:mm:ss.000';
+            for (let cycle = 0; cycle < 3; cycle++) {
+                const localized = api.asc_convertNumFormat2NumFormatLocal(canonical);
+                canonical = api.asc_convertNumFormatLocal2NumFormat(localized);
+                assert.strictEqual(formatText(canonical, dateTime), '05.12.2026 13.14.15;125',
+                    'regional time and decimal signs survive conversion');
+                assert.strictEqual(formatText(canonical, -1), '#', 'the negative value remains an invalid date');
+            }
+        });
+
+        QUnit.test('decimal semicolons preserve explicit date and text sections', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            AscCommon.setCurrentCultureInfo(1033, ';', ',');
+            let canonical = 'dd.mm.yyyy hh:mm:ss.000;[Red]dd.mm.yyyy hh:mm:ss.000;dd.mm.yyyy hh:mm:ss.000;@';
+            const values = [
+                [dateTime, '05.12.2026 13:14:15;125'], [-1, '#'],
+                [0, '00.01.1900 00:00:00;000'], ['sample', 'sample']
+            ];
+            for (let cycle = 0; cycle < 3; cycle++) {
+                const localized = api.asc_convertNumFormat2NumFormatLocal(canonical);
+                canonical = api.asc_convertNumFormatLocal2NumFormat(localized);
+                values.forEach(function (item) {
+                    const type = typeof item[0] === 'string' ? AscCommon.CellValueType.String : undefined;
+                    assert.strictEqual(formatText(canonical, item[0], undefined, type), item[1],
+                        'date section: ' + item[0] + ', ' + cycle);
+                });
+            }
+        });
+
+        QUnit.test('decimal semicolons retain existing localized numeric grouping', function (assert) {
+            [1033, 1049].forEach(function (lcid) {
+                AscCommon.setCurrentCultureInfo(lcid, ';', '.');
+                const code = '#.##0;[Red](#.##0);0;@';
+                const format = new AscCommon.CellFormat(code, undefined, true);
+                [[1234, '1.234'], [-1234, '(1.234)'], [0, '0'], ['sample', 'sample']].forEach(function (item) {
+                    const type = typeof item[0] === 'string' ? AscCommon.CellValueType.String : undefined;
+                    assert.strictEqual(format.format(item[0], type, 15, false, undefined, true)
+                        .map(function (part) { return part.text; }).join(''), item[1],
+                        'existing number section: ' + lcid + ', ' + item[0]);
+                });
+            });
+        });
+
+        QUnit.test('decimal semicolons keep grouping and time punctuation in mixed date formats', function (assert) {
+            const api = AscCommon.baseEditorsApi.prototype;
+            const cases = [
+                ['yyyy 0,000', ':', '2026 46.361'],
+                ['yyyy #,000', ':', '2026 46.361'],
+                ['hh:000', '.', '00.46361'],
+                ['ss".000"', ':', '00.000'],
+                ['ss"[.000]"', ':', '00[.000]'],
+                ['ss\\[\\.\\0\\0\\0\\]', ':', '00[.000]']
+            ];
+            cases.forEach(function (item) {
+                AscCommon.setCurrentCultureInfo(1033, ';', '.');
+                AscCommon.g_oDefaultCultureInfo.TimeSeparator = item[1];
+                let canonical = item[0];
+                for (let cycle = 0; cycle < 3; cycle++) {
+                    const localized = api.asc_convertNumFormat2NumFormatLocal(canonical);
+                    canonical = api.asc_convertNumFormatLocal2NumFormat(localized);
+                    assert.strictEqual(formatText(canonical, 46361), item[2], 'existing mixed format: ' + item[0]);
+                    const result = new AscCommonExcel.cTEXT().Calculate([
+                        new AscCommonExcel.cNumber(46361), new AscCommonExcel.cString(localized)
+                    ]);
+                    assert.strictEqual(result.getValue(), item[2], 'TEXT preserves the existing mixed format');
+                }
+            });
+        });
+
+        QUnit.test('decimal semicolons retain unescaped literal punctuation in existing local formats', function (assert) {
+            AscCommon.setCurrentCultureInfo(1033, ';', ',');
+            const code = 'ss.000';
+            const format = new AscCommon.CellFormat(code, undefined, true);
+            assert.strictEqual(format.format(46361, undefined, 15, false, undefined, true)
+                .map(function (part) { return part.text; }).join(''), '00.46361',
+                'an existing literal point does not become fractional seconds');
+            assert.strictEqual(new AscCommonExcel.cTEXT().Calculate([
+                new AscCommonExcel.cNumber(46361), new AscCommonExcel.cString(code)
+            ]).getValue(), '00.46361', 'TEXT retains the existing local punctuation');
+        });
+
+        QUnit.test('literal date points work with the 1904 date system', function (assert) {
+            AscCommon.bDate1904 = true;
+            cultures().slice(0, 2).forEach(function (culture) {
+                assert.strictEqual(formatText('dd.mm.yyyy', 44899, culture), '05.12.2026');
+            });
+        });
+
+        QUnit.test('chart and word consumers keep literal date points and localized fractional seconds', function (assert) {
+            const cases = [
+                ['dd.mm.yyyy', '05.12.2026', '05.12.2026'],
+                ['dd.mm.yyyy hh:mm:ss.000', '05.12.2026 13:14:15,125', '05.12.2026 13:14:15.125']
+            ];
+            cultures().forEach(function (culture, index) {
+                cases.forEach(function (item) {
+                    ['formatToChart', 'formatToWord'].forEach(function (method) {
+                        const format = new AscCommon.CellFormat(item[0]);
+                        const expected = culture.NumberDecimalSeparator === ',' ? item[1] : item[2];
+                        assert.strictEqual(format[method](dateTime, 15, culture), expected,
+                            method + ', culture ' + index + ', ' + item[0]);
+                    });
+                });
+            });
+        });
     });
 
 });

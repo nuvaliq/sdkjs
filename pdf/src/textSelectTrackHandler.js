@@ -55,8 +55,9 @@
 		let oDoc = Asc.editor.getPDFDoc();
 		let isCanEditShape = Asc.editor.canEdit();
 
-		let oFile = Asc.editor.getDocumentRenderer().file;
-		if (false == oFile.isSelectionUse() || false === Asc.editor.NeedShowTextSelectPanel() || (oDoc.activeDrawing && isCanEditShape)) {
+		let oViewer = Asc.editor.getDocumentRenderer();
+		let oFile = oViewer && oViewer.file;
+		if (!oFile || !oFile.isValid || !oFile.isValid() || false == oFile.isSelectionUse() || false === Asc.editor.NeedShowTextSelectPanel() || (oDoc.activeDrawing && isCanEditShape)) {
 			this.OnHide();
 			return;
 		}

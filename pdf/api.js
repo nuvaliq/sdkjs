@@ -72,6 +72,7 @@
 		
 		// TODO: Perhaps we should move initialization to
 		this.initDocumentRenderer();
+		this._pdfOpenLoadGeneration = this.documentLoadGeneration || 0;
 		this.DocumentRenderer.open(file.data);
 		
 		AscCommon.InitBrowserInputContext(this, "id_target_cursor", "id_viewer");
@@ -152,7 +153,7 @@
 		this.DocumentRenderer.setTargetType(type);
 	};
 	PDFEditorApi.prototype["asc_getPageSize"] = function(pageIndex) {
-		if (!this.DocumentRenderer)
+		if (!this.DocumentRenderer || !this.DocumentRenderer.file || !this.DocumentRenderer.file.isValid())
 			return null;
 		
 		let page = this.DocumentRenderer.file.pages[pageIndex];
@@ -387,21 +388,44 @@
 
 		return bCanUndo;
 	};
-	PDFEditorApi.prototype.asc_PasteData = function(_format, data1, data2, text_data, useCurrentPoint, callback, checkLocks) {
-		if (!this.DocumentRenderer)
+	PDFEditorApi.prototype.asc_PasteData = function(_format, data1, data2, text_data, useCurrentPoint, callback, checkLocks, rejectCallback) {
+		if (!this.DocumentRenderer || !this.DocumentRenderer.file || !this.DocumentRenderer.file.isValid || !this.DocumentRenderer.file.isValid() ||
+			(AscCommon.CollaborativeEditing && AscCommon.CollaborativeEditing.Get_GlobalLock && AscCommon.CollaborativeEditing.Get_GlobalLock())) {
+			rejectCallback && rejectCallback();
 			return;
+		}
 		
 		if (!this.DocumentRenderer.canInteract()) {
 			let _t = this;
 			let args = arguments;
+			let loadGeneration = this.documentLoadGeneration || 0;
+			let settled = false;
+			let rejectOnce = function() {
+				if (!settled) {
+					settled = true;
+					rejectCallback && rejectCallback();
+				}
+			};
 			
 			this.DocumentRenderer.paint(null, function() {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if ((_t.documentLoadGeneration || 0) !== loadGeneration) {
+					rejectCallback && rejectCallback();
+					return;
+				}
 				_t.asc_PasteData.apply(_t, args);
-			});
+			}, rejectOnce);
 			return;
 		}
 		
 		let oDoc = this.DocumentRenderer.getPDFDoc();
+		if (!oDoc) {
+			rejectCallback && rejectCallback();
+			return;
+		}
 		let data = typeof(text_data) == "string" ? text_data : data1;
 
 		oDoc.StartAction(AscDFH.historydescription_Document_PasteHotKey);
@@ -410,15 +434,20 @@
 		// currently binary copying only within drawings or drawings themselves
 		if ([AscCommon.c_oAscClipboardDataFormat.Internal, AscCommon.c_oAscClipboardDataFormat.HtmlElement, AscCommon.c_oAscClipboardDataFormat.Text].includes(_format)) {
 			window['AscCommon'].g_specialPasteHelper.Paste_Process_Start(arguments[5]);
-			AscCommon.Editor_Paste_Exec(this, _format, data1, data2, text_data, undefined, callback);
+			AscCommon.Editor_Paste_Exec(this, _format, data1, data2, text_data, undefined, callback, rejectCallback);
 		}
 		else {
 			this.needPasteText = true;
 		}
 		
 		this.pastePageBefore = undefined;
-		if (!this.needPasteText || typeof(data) != "string")
+		if (!this.needPasteText || typeof(data) != "string") {
+			if (this.needPasteText) {
+				oDoc.FinalizeAction(true);
+				rejectCallback && rejectCallback();
+			}
 			return;
+		}
 
 		AscFonts.FontPickerByCharacter.checkText(data, this, processPaste);
 
@@ -429,12 +458,15 @@
 
 			this.asc_enterText(aChars, true);
 			oDoc.FinalizeAction(true);
+			callback && callback();
 		}
 	};
 	PDFEditorApi.prototype.asc_setAdvancedOptions = function(idOption, option) {
 		if (this.advancedOptionsAction !== AscCommon.c_oAscAdvancedOptionsAction.Open
 			|| AscCommon.EncryptionWorker.asc_setAdvancedOptions(this, idOption, option)
-			|| !this.DocumentRenderer)
+			|| !this.DocumentRenderer
+			|| !this.DocumentRenderer.file
+			|| (this._pdfOpenLoadGeneration != null && this._pdfOpenLoadGeneration !== (this.documentLoadGeneration || 0)))
 			return;
 		
 		this.DocumentRenderer.open(null, option.asc_getPassword());
@@ -471,7 +503,7 @@
 		this.DocumentRenderer.endStatistics();
 	};
 	PDFEditorApi.prototype.asc_searchEnabled = function(isEnabled) {
-		if (!this.DocumentRenderer)
+		if (!this.DocumentRenderer || !this.DocumentRenderer.SearchResults)
 			return;
 		
 		this.DocumentRenderer.SearchResults.IsSearch = isEnabled;
@@ -480,9 +512,9 @@
 	PDFEditorApi.prototype.asc_findText = function(props, isNext) {
 		let oViewer 		= this.getDocumentRenderer();
 		let oDoc			= this.getPDFDoc();
-		let oSearchEngine	= oDoc.SearchEngine;
+		let oSearchEngine	= oDoc && oDoc.SearchEngine;
 
-		if (!oViewer)
+		if (!oViewer || !oViewer.file || !oViewer.file.isValid() || !oSearchEngine)
 			return 0;
 		
 		oViewer.IsSearch = true;
@@ -499,10 +531,10 @@
 			return;
 		
 		this.DocumentRenderer.IsSearch = false;
-		this.DocumentRenderer.file.onUpdateOverlay();
+		this.DocumentRenderer.onUpdateOverlay();
 	};
 	PDFEditorApi.prototype.asc_isSelectSearchingResults = function() {
-		if (!this.DocumentRenderer)
+		if (!this.DocumentRenderer || !this.DocumentRenderer.SearchResults)
 			return false;
 		
 		return this.DocumentRenderer.SearchResults.Show;
@@ -3470,18 +3502,25 @@
         }, AscDFH.historydescription_Pdf_ChangeAnnot);
 	};
 	
-	PDFEditorApi.prototype.asc_CloseFile = function() {
-		AscCommon.History.Clear();
-		AscCommon.g_oIdCounter.Clear();
-		AscCommon.g_oTableId.Clear();
-		AscCommon.CollaborativeEditing.Clear();
-		this.isApplyChangesOnOpenEnabled = true;
-		this.isDocumentLoadComplete = false;
-		this.ServerImagesWaitComplete = false;
-		this.turnOffSpecialModes();
-		AscCommon.pptx_content_loader.ImageMapChecker = {};
+	PDFEditorApi.prototype.asc_CloseFile = function(keepServerWaitAction) {
+		var closeBody = function() {
+			this._closeDocumentLoad(keepServerWaitAction);
+			AscCommon.History.Clear();
+			AscCommon.g_oIdCounter.Clear();
+			AscCommon.g_oTableId.Clear();
+			AscCommon.CollaborativeEditing.Clear();
+			this.isApplyChangesOnOpenEnabled = true;
+			this.isDocumentLoadComplete = false;
+			this.ServerImagesWaitComplete = false;
+			this.turnOffSpecialModes();
+			AscCommon.pptx_content_loader.ImageMapChecker = {};
 
-		this.sendEvent("asc_onCloseFile");
+			this.sendEvent("asc_onCloseFile");
+		};
+		if (this._runAbortScope)
+			this._runAbortScope(closeBody);
+		else
+			closeBody.call(this);
 	};
 
 	/////////////////////////////////////////////////////////////
@@ -4803,7 +4842,7 @@
 		else if (oThumbnails && oThumbnails.isInFocus) {
 			oThumbnails.selectAll();
 		}
-		else {
+		else if (oViewer.file && oViewer.file.isValid()) {
 			oViewer.file.selectAll();
 		}
 		
@@ -4824,7 +4863,8 @@
 		if(!oDoc)
 			return;
 
-		oViewer.file.removeSelection();
+		if (oViewer.file && oViewer.file.isValid())
+			oViewer.file.removeSelection();
 
 		oDoc.BlurActiveObject();
 		oViewer.onUpdateOverlay();
@@ -4880,6 +4920,8 @@
 		});
 		
 		documentRenderer.registerEvent("onFileOpened", function() {
+			if (_t._pdfOpenLoadGeneration != null && _t._pdfOpenLoadGeneration !== (_t.documentLoadGeneration || 0))
+				return;
 			_t.disableRemoveFonts = true;
 
 			documentRenderer.isDocumentContentReady = true;
@@ -4999,7 +5041,9 @@
 		var _bIsOldPaste                      = this.isPasteFonts_Images;
 
 		// this.EndActionLoadImages may change on _openDocumentEndCallback method
-		if (this.EndActionLoadImages == 1) {
+		if (this.endImageLoadAction)
+			this.endImageLoadAction();
+		else if (this.EndActionLoadImages == 1) {
 			this.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.LoadDocumentImages);
 		}
 		else if (this.EndActionLoadImages == 2) {
@@ -5017,16 +5061,24 @@
 		}
 		else {
 			if (this.isPasteFonts_Images) {
+				var pasteCb = this.pasteCallback;
 				this.isPasteFonts_Images = false;
 				this.pasteImageMap       = null;
-				this.pasteCallback();
-				this.pasteCallback            = null;
-				this.decrementCounterLongAction();
+				this.pasteCancelCallback = null;
+				this.pasteCallback       = null;
+				try {
+					pasteCb && pasteCb.call(this);
+				} finally {
+					this.decrementCounterLongAction();
+				}
 			}
 			else if (this.isSaveFonts_Images) {
 				this.isSaveFonts_Images = false;
 				this.saveImageMap       = null;
+				var loadGeneration = this.documentLoadGeneration || 0;
 				this.pre_SaveCallback();
+				if ((this.documentLoadGeneration || 0) !== loadGeneration)
+					return;
 
 				if (this.bInit_word_control === false)
 				{
@@ -5124,6 +5176,7 @@
 
 			// TODO: onDocumentContentReady is called at the end of loading all changes (and objects for these changes)
 			let oThis = this;
+			let loadGeneration = this.documentLoadGeneration || 0;
 			
 			// Accept changes on open only if this is the editor or LiveViewer (i.e., fast collaboration is enabled)
 			if (this.isLiveViewer() || !this.isPdfViewer)
@@ -5132,6 +5185,10 @@
 				let OtherChanges = AscCommon.CollaborativeEditing.Have_OtherChanges();
 				AscCommon.CollaborativeEditing.Apply_Changes(function()
 				{
+					if ((oThis.documentLoadGeneration || 0) !== loadGeneration)
+					{
+						return;
+					}
 					let perfEnd = performance.now();
 					if (OtherChanges)
 					{
@@ -5139,6 +5196,8 @@
 					}
 					oThis.onDocumentContentReady();
 				});
+				if ((this.documentLoadGeneration || 0) !== loadGeneration)
+					return;
 				AscCommon.CollaborativeEditing.Release_Locks();
 			}
 			else
@@ -5146,6 +5205,8 @@
 				this.onDocumentContentReady();
 			}
 
+			if ((this.documentLoadGeneration || 0) !== loadGeneration)
+				return;
 			this.isApplyChangesOnOpen = true;
 		}
 		this.initBroadcastChannelListeners();

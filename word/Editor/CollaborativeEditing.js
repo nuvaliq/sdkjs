@@ -225,34 +225,45 @@ CWordCollaborativeEditing.prototype.Release_Locks = function()
 };
 CWordCollaborativeEditing.prototype.OnEnd_Load_Objects = function()
 {
-    // Данная функция вызывается, когда загрузились внешние объекты (картинки и шрифты)
+    var oApi = this.GetEditorApi() || (window.Asc && window.Asc.editor) || window.editor;
+    var generation = oApi.documentLoadGeneration || 0;
+    var oLogicDocument = this.m_oLogicDocument;
+    var wasRecalcPaused = this.m_bRecalculatePausedByApplyChanges;
+    var fEndCallBack = this.m_fEndLoadCallBack;
+    this.m_fEndLoadCallBack = null;
+    this.m_bApplyChangesInProgress = false;
+    this.m_bRecalculatePausedByApplyChanges = false;
+    this.Set_GlobalLock(false);
+    this.Set_GlobalLockSelection(false);
 
-    // Снимаем лок
-    AscCommon.CollaborativeEditing.Set_GlobalLock(false);
-    AscCommon.CollaborativeEditing.Set_GlobalLockSelection(false);
-
-	if (this.m_fEndLoadCallBack)
-	{
-		this.m_fEndLoadCallBack();
-		this.m_fEndLoadCallBack = null;
-	}
+    if (fEndCallBack)
+        fEndCallBack();
+    if ((oApi.documentLoadGeneration || 0) !== generation)
+    {
+        if (wasRecalcPaused && oLogicDocument && oLogicDocument.RecalcInfo)
+            oLogicDocument.RecalcInfo.Paused = false;
+        return;
+    }
 
 	var nPageIndex  = undefined;
     if (this.Is_Fast())
 	{
-		var oParagraph = this.m_oLogicDocument.GetCurrentParagraph();
-		nPageIndex     = oParagraph ? Math.max(oParagraph.GetAbsoluteCurrentPage(), editor.GetCurrentVisiblePage()) : undefined;
+		var oParagraph = oLogicDocument.GetCurrentParagraph();
+		nPageIndex     = oParagraph ? Math.max(oParagraph.GetAbsoluteCurrentPage(), oApi.GetCurrentVisiblePage()) : undefined;
 	}
 	
-	this.m_oLogicDocument.ResumeRecalculate();
-	this.m_oLogicDocument.RecalculateByChanges(this.CoHistory.GetAllChanges(), this.m_nRecalcIndexStart, this.m_nRecalcIndexEnd, false, nPageIndex);
-	this.m_oLogicDocument.UpdateTracks();
+	oLogicDocument.ResumeRecalculate();
+	oLogicDocument.RecalculateByChanges(this.CoHistory.GetAllChanges(), this.m_nRecalcIndexStart, this.m_nRecalcIndexEnd, false, nPageIndex);
+	oLogicDocument.UpdateTracks();
 	
-	let oform = this.m_oLogicDocument.GetOFormDocument();
+	let oform = oLogicDocument.GetOFormDocument();
 	if (oform)
 		oform.onEndLoadChanges();
 
-    editor.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
+    if (oApi.endApplyChangesAction)
+        oApi.endApplyChangesAction();
+    else
+        oApi.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
 };
 CWordCollaborativeEditing.prototype.Check_MergeData = function()
 {

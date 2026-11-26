@@ -297,28 +297,42 @@ CPDFCollaborativeEditing.prototype.Send_Changes = function(IsUserSave, Additiona
 };
 CPDFCollaborativeEditing.prototype.OnEnd_Load_Objects = function()
 {
-    // This function is called when external objects (images and fonts) have loaded
+    var oApi = this.GetEditorApi() || (window.Asc && window.Asc.editor) || window.editor;
+    var generation = oApi.documentLoadGeneration || 0;
+    var oLogicDocument = this.m_oLogicDocument;
+    var wasRecalcPaused = this.m_bRecalculatePausedByApplyChanges;
+    var fEndCallBack = this.m_fEndLoadCallBack;
+    this.m_fEndLoadCallBack = null;
+    this.m_bApplyChangesInProgress = false;
+    this.m_bRecalculatePausedByApplyChanges = false;
+    this.Set_GlobalLock(false);
+    this.Set_GlobalLockSelection(false);
 
-    // Remove the lock
-    AscCommon.CollaborativeEditing.Set_GlobalLock(false);
-    AscCommon.CollaborativeEditing.Set_GlobalLockSelection(false);
+    if (fEndCallBack)
+        fEndCallBack();
+    if ((oApi.documentLoadGeneration || 0) !== generation)
+    {
+        if (wasRecalcPaused && oLogicDocument && oLogicDocument.RecalcInfo)
+            oLogicDocument.RecalcInfo.Paused = false;
+        return;
+    }
 
-	if (this.m_fEndLoadCallBack)
-	{
-		this.m_fEndLoadCallBack();
-		this.m_fEndLoadCallBack = null;
-	}
-
-	this.m_oLogicDocument.ResumeRecalculate();
-	this.m_oLogicDocument.RecalculateByChanges(this.CoHistory.GetAllChanges(), this.m_nRecalcIndexStart, this.m_nRecalcIndexEnd, false, undefined);
-	this.m_oLogicDocument.UpdateTracks();
+	oLogicDocument.ResumeRecalculate();
+	oLogicDocument.RecalculateByChanges(this.CoHistory.GetAllChanges(), this.m_nRecalcIndexStart, this.m_nRecalcIndexEnd, false, undefined);
+	oLogicDocument.UpdateTracks();
 	
-    this.m_aEndLoadCallbacks.forEach(function(callback) {
-        callback();
-    });
-    this.m_aEndLoadCallbacks.length = 0;
+    var callbacks = this.m_aEndLoadCallbacks.splice(0);
+    for (var i = 0; i < callbacks.length; i++)
+    {
+        callbacks[i]();
+        if ((oApi.documentLoadGeneration || 0) !== generation)
+            return;
+    }
 
-    editor.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
+    if (oApi.endApplyChangesAction)
+        oApi.endApplyChangesAction();
+    else
+        oApi.sync_EndAction(Asc.c_oAscAsyncActionType.BlockInteraction, Asc.c_oAscAsyncAction.ApplyChanges);
 };
 CPDFCollaborativeEditing.prototype.canSendChanges = function(){
     let oApi = this.GetEditorApi();

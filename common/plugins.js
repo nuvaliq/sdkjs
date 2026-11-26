@@ -107,6 +107,7 @@
 		this.type = type;
 		this.guid = guid;
 		this.value = null;
+		this.loadGeneration = 0;
 
 		// only for Method
 		this.name = "";
@@ -142,6 +143,9 @@
 		this.runAndCloseData = null;
 
 		this.queueCommands = [];
+		this.isCommandRunning = false;
+		this.isSyncDispatching = false;
+		this.queueSuspendCount = 0;
 
 		this.internalGuid = "onlyoffice_internal_guid";
 		this.internalCallbacks = [];
@@ -1491,96 +1495,158 @@
 		},
 
 		// commands
-		shiftCommand : function(returnValue)
+		_isQueueSuspended : function()
+		{
+			return this.queueSuspendCount > 0 || Boolean(this.api && this.api.isPluginQueueSuspended && this.api.isPluginQueueSuspended());
+		},
+
+		suspendQueue : function()
+		{
+			this.queueSuspendCount++;
+		},
+
+		resumeQueue : function()
+		{
+			if (this.queueSuspendCount > 0)
+				this.queueSuspendCount--;
+			this._runNextCommand();
+		},
+
+		flushQueue : function()
+		{
+			this._runNextCommand();
+		},
+
+		_notifyCommandResult : function(command, returnValue, internalCallback, isCurrentTask)
+		{
+			if (command.guid === this.internalGuid)
+			{
+				if (isCurrentTask)
+					this.internalCommandAsync = false;
+				if (internalCallback)
+					internalCallback(returnValue);
+				return;
+			}
+
+			let runObject = this.runnedPluginsMap[command.guid];
+			if (isCurrentTask && command.type === CommandTaskType.Method && runObject)
+				runObject.methodReturnAsync = false;
+
+			// send callback
+			if (!command.closed && runObject)
+			{
+				let pluginDataTmp = new CPluginData();
+				pluginDataTmp.setAttribute("guid", command.guid);
+
+				if (command.type === CommandTaskType.Command)
+				{
+					pluginDataTmp.setAttribute("type", "onCommandCallback");
+					pluginDataTmp.setAttribute("commandReturnData", returnValue);
+				}
+				else
+				{
+					pluginDataTmp.setAttribute("type", "onMethodReturn");
+					pluginDataTmp.setAttribute("methodReturnData", returnValue);
+				}
+
+				this.sendMessageToFrame(runObject.isConnector ? "" : runObject.frameId, pluginDataTmp);
+			}
+		},
+
+		_runNextCommand : function()
+		{
+			if (this.isCommandRunning || 0 === this.queueCommands.length || this._isQueueSuspended())
+				return;
+
+			this.isCommandRunning = true;
+			let nextCommand = this.queueCommands[0];
+			if (nextCommand.type === CommandTaskType.Command)
+			{
+				this.callCommandInternal(nextCommand.value, nextCommand);
+			}
+			else
+			{
+				this.callMethodInternal(nextCommand.guid, nextCommand.name, nextCommand.value, nextCommand);
+			}
+		},
+
+		cancelQueuedCommands : function(returnValue, maxGeneration)
 		{
 			if (0 === this.queueCommands.length)
+				return;
+			if (this.isSyncDispatching && !(this.api && this.api.isPluginQueuePausedForRefresh))
+				return;
+
+			let startIndex = this.isCommandRunning ? 1 : 0;
+			let internalIndex = (startIndex === 1 && this.queueCommands[0] && this.queueCommands[0].guid === this.internalGuid) ? 1 : 0;
+			let cancelled = [];
+
+			for (let i = startIndex; i < this.queueCommands.length;)
+			{
+				let task = this.queueCommands[i];
+				if (undefined === maxGeneration || task.loadGeneration < maxGeneration)
+				{
+					this.queueCommands.splice(i, 1);
+					let internalCb = null;
+					if (task.guid === this.internalGuid && this.internalCallbacks)
+						internalCb = this.internalCallbacks.splice(internalIndex, 1)[0];
+					cancelled.push({ task: task, internalCallback: internalCb });
+				}
+				else
+				{
+					if (task.guid === this.internalGuid)
+						internalIndex++;
+					i++;
+				}
+			}
+
+			for (let i = 0; i < cancelled.length; ++i)
+			{
+				let entry = cancelled[i];
+				let result = entry.task.type === CommandTaskType.Command ? undefined : returnValue;
+				this._notifyCommandResult(entry.task, result, entry.internalCallback, false);
+			}
+		},
+
+		shiftCommand : function(returnValue)
+		{
+			if (!this.isCommandRunning || 0 === this.queueCommands.length)
 			{
 				// means a plugin method was called outside of a plugin
 				return;
 			}
 
 			let currentCommand = this.queueCommands.shift();
+			this.isCommandRunning = false;
 
-			if (currentCommand.guid === this.internalGuid)
-			{
-				let handler = this.internalCallbacks.shift();
-				if (handler)
-					handler(returnValue);
-				this.internalCommandAsync = false;
-			}
-			else
-			{
-				let runObject = this.runnedPluginsMap[currentCommand.guid];
-
-				// send callback
-				if (!currentCommand.closed && runObject)
-				{
-					let pluginDataTmp = new CPluginData();
-					pluginDataTmp.setAttribute("guid", currentCommand.guid);
-
-					if (currentCommand.type === CommandTaskType.Command)
-					{
-						pluginDataTmp.setAttribute("type", "onCommandCallback");
-						pluginDataTmp.setAttribute("commandReturnData", returnValue);
-					}
-					else
-					{
-						pluginDataTmp.setAttribute("type", "onMethodReturn");
-						pluginDataTmp.setAttribute("methodReturnData", returnValue);
-						runObject.methodReturnAsync = false;
-					}
-
-					this.sendMessageToFrame(runObject.isConnector ? "" : runObject.frameId, pluginDataTmp);
-				}
-			}
-
-			if (this.queueCommands.length > 0)
-			{
-				let nextCommand = this.queueCommands[0];
-				if (nextCommand.type === CommandTaskType.Command)
-				{
-					this.callCommandInternal(nextCommand.value, nextCommand);
-				}
-				else
-				{
-					this.callMethodInternal(nextCommand.guid, nextCommand.name, nextCommand.value);
-				}
-			}
+			let handler = (currentCommand.guid === this.internalGuid && this.internalCallbacks) ? this.internalCallbacks.shift() : null;
+			this._notifyCommandResult(currentCommand, returnValue, handler, true);
+			this._runNextCommand();
 		},
 
 		callCommand : function(guid, value, isClose, isInterface, isRecalculate, isResize)
 		{
 			let task = new CCommandTask(CommandTaskType.Command, guid);
+			task.loadGeneration = this.api ? (this.api.documentLoadGeneration || 0) : 0;
 			task.closed = isClose;
 			task.interface = isInterface;
 			task.recalculate = isRecalculate;
 			task.resize = isResize;
-
-			if (0 === this.queueCommands.length)
-			{
-				this.queueCommands.push(task);
-				this.callCommandInternal(value, task);
-				return;
-			}
-
 			task.value = value;
+
 			this.queueCommands.push(task);
+			this._runNextCommand();
 		},
 
 		callMethod : function(guid, name, value)
 		{
 			let task = new CCommandTask(CommandTaskType.Method, guid);
-
-			if (0 === this.queueCommands.length)
-			{
-				this.queueCommands.push(task);
-				this.callMethodInternal(guid, name, value);
-				return;
-			}
-
+			task.loadGeneration = this.api ? (this.api.documentLoadGeneration || 0) : 0;
 			task.name = name;
 			task.value = value;
+
 			this.queueCommands.push(task);
+			this._runNextCommand();
 		},
 
 		getCurrentPluginGuid : function()
@@ -1599,16 +1665,16 @@
 			}
 			
 			let commandReturnValue = undefined;
+			let prevSyncDispatching = this.isSyncDispatching;
+			this.isSyncDispatching = true;
+			let isAsyncCommand = false;
 			try
 			{
 				if ( !AscCommon.isValidJs(value) )
 				{
 					console.error('Invalid JS.');
-					this.shiftCommand(commandReturnValue);
-					return;
 				}
-
-				if (task.interface)
+				else if (task.interface)
 				{
 					AscCommon.safePluginEval(value);
 				}
@@ -1629,23 +1695,31 @@
 							if (!result)
 								commandReturnValue = undefined;
 							
-							_t.shiftCommand(commandReturnValue);
+							if (_t.queueCommands[0] === task)
+								_t.shiftCommand(commandReturnValue);
 						});
 					}
 					
+					this.isSyncDispatching = prevSyncDispatching;
 					if (task.recalculate === true && !AscCommon.History.Is_LastPointEmpty())
 						this.api._afterEvalCommand(onEndScript);
 					else
 						onEndScript();
-					
-					return;
+
+					if (this.queueCommands[0] === task)
+						isAsyncCommand = true;
 				}
 			}
 			catch (err)
 			{
 			}
+			finally
+			{
+				this.isSyncDispatching = prevSyncDispatching;
+			}
 
-			this.shiftCommand(commandReturnValue);
+			if (!isAsyncCommand && this.queueCommands[0] === task)
+				this.shiftCommand(commandReturnValue);
 		},
 
 		setPluginMethodReturnAsync : function()
@@ -1669,7 +1743,7 @@
 			this.shiftCommand(returnValue);
 		},
 
-		callMethodInternal : function(guid, name, value)
+		callMethodInternal : function(guid, name, value, task)
 		{
 			if (this.api && this.api.isLogPluginCommands())
 			{
@@ -1682,21 +1756,40 @@
 			let methodName = "pluginMethod_" + name;
 			let methodRetValue = undefined;
 
-			if (this.api[methodName])
+			let prevSyncDispatching = this.isSyncDispatching;
+			this.isSyncDispatching = true;
+			try
 			{
-				let api = this.api;
-				
-				if ("StartAction" === name || "EndAction" === name)
+				if (this.api[methodName])
 				{
-					methodRetValue = api[methodName].apply(api, value);
-				}
-				else
-				{
-					methodRetValue = api.executeGroupActions(function(){
-						return api[methodName].apply(api, value);
-					});
+					let api = this.api;
+
+					if ("StartAction" === name || "EndAction" === name)
+					{
+						methodRetValue = api[methodName].apply(api, value);
+					}
+					else
+					{
+						methodRetValue = api.executeGroupActions(function(){
+							return api[methodName].apply(api, value);
+						});
+					}
 				}
 			}
+			catch (err)
+			{
+				this.isSyncDispatching = prevSyncDispatching;
+				if (!task || this.queueCommands[0] === task)
+					this.shiftCommand(undefined);
+				throw err;
+			}
+			finally
+			{
+				this.isSyncDispatching = prevSyncDispatching;
+			}
+
+			if (task && this.queueCommands[0] !== task)
+				return;
 
 			if (guid === this.internalGuid)
 			{
@@ -1706,7 +1799,7 @@
 			else
 			{
 				let runObject = this.runnedPluginsMap[guid];
-				if (!runObject.methodReturnAsync)
+				if (!runObject || !runObject.methodReturnAsync)
 					this.shiftCommand(methodRetValue);
 			}
 		}

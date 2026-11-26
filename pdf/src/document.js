@@ -307,7 +307,10 @@ var CPresentation = CPresentation || function(){};
     CPDFDoc.prototype.UpdatePagesTransform = function() {
         this.pagesTransform = [];
 
-        let oFile = this.Viewer.file;
+        let oFile = this.Viewer && this.Viewer.file;
+        if (!oFile || !oFile.isValid || !oFile.isValid()) {
+            return;
+        }
         for (let i = 0; i < oFile.pages.length; i++) {
             let oPage = this.Viewer.drawingPages[i];
             if (!oPage) {
